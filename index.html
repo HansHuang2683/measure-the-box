@@ -145,10 +145,12 @@
                 <button class="btn btn-sm btn-outline" onclick="onEnterSandbox()">🖐 沙盘模式</button>
                 <button class="btn btn-sm btn-outline" id="cavityToggle" onclick="toggleCavityAlgorithm()">空腔吸附: OFF</button>
                 <button class="btn btn-sm btn-outline" id="cavityShowToggle" onclick="toggleCavityViewer()" style="display:none;">显示空腔: OFF</button>
+                <button class="btn btn-sm btn-outline" id="replenishmentBtn" onclick="toggleReplenishmentPanel()">补货推荐</button>
             </div>
             <div id="viewer-container">
                 <div class="viewer-empty">选择上方下拉菜单中的箱子查看 3D 布局</div>
             </div>
+            <div id="replenishmentPanel" style="margin-top:12px;display:none;"></div>
             <div id="cavityDiagnostics" style="margin-top:8px;display:none;"></div>
         </div>
     </div>
@@ -160,6 +162,7 @@
 <script src="js/algorithm.js"></script>
 <script src="js/algorithm-mixed.js?v=2"></script>
 <script src="js/algorithm-cavity.js?v=3"></script>
+<script src="js/replenishment.js?v=1"></script>
 <script src="js/distribution.js"></script>
 <script src="js/customBox.js?v=2"></script>
 <script src="js/xlsxHandler.js"></script>

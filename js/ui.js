@@ -14,6 +14,11 @@ let _useCavityAlgorithm = false; // 默认关闭，使用原层架算法
 // ---- 最后一次 3D 渲染的上下文（用于无 dropdown 选值时重渲染） ----
 let _lastViewerContext = null; // { groupId, boxIdx }
 
+// ---- 补货推荐状态 ----
+let _lastReplenishmentPlan = null;
+let _manualReplenishmentCandidates = [];
+let _nextManualReplenishmentId = 1;
+
 /**
  * 根据当前算法设置获取布局结果
  * 新算法返回 { status, productVolume, boxVolume, volumeUtilization, message, layers, cavities, diagnostics }
@@ -113,6 +118,292 @@ function toggleCavityViewer() {
             btn.classList.toggle('cavity-active', visible);
         }
     }
+}
+
+// ===== 补货推荐 =====
+
+function getCurrentViewerGroupAndBox() {
+    const select = document.getElementById('viewerSelect');
+    const val = select?.value;
+    if (!val) return null;
+    const [groupId, boxIdx] = val.split('|');
+    const group = mixedGroups.find(g => g.id === groupId);
+    const boxType = group ? boxTypes.find(b => b.id === group.boxTypeId) : null;
+    if (!group || !boxType) return null;
+    return { group, boxType, boxIdx: parseInt(boxIdx) || 0 };
+}
+
+function toggleReplenishmentPanel() {
+    const panel = document.getElementById('replenishmentPanel');
+    if (!panel) return;
+    const ctx = getCurrentViewerGroupAndBox();
+    if (!ctx) {
+        alert('请先选择一个箱子预览');
+        return;
+    }
+    if (panel.style.display === 'none' || !panel.style.display) {
+        panel.style.display = '';
+        renderReplenishmentPanel();
+    } else {
+        panel.style.display = 'none';
+        if (typeof window.clearReplenishmentOverlay === 'function') window.clearReplenishmentOverlay();
+    }
+}
+
+function renderReplenishmentPanel(plan) {
+    const panel = document.getElementById('replenishmentPanel');
+    if (!panel) return;
+    const ctx = getCurrentViewerGroupAndBox();
+    if (!ctx) {
+        panel.innerHTML = '<div class="replenishment-panel"><div class="replenishment-empty">请先选择一个箱子预览</div></div>';
+        return;
+    }
+
+    const autoCandidates = typeof buildReplenishmentCandidates === 'function'
+        ? buildReplenishmentCandidates(skus, mixedGroups, ctx.group, ctx.boxType)
+        : [];
+    const rowsHtml = _manualReplenishmentCandidates.map(c => _renderManualCandidateRow(c)).join('');
+    const resultHtml = plan ? _renderReplenishmentResult(plan) : '<div class="replenishment-empty">点击“重新计算”后生成每箱补货数量和预计利用率提升。</div>';
+
+    panel.innerHTML = `
+        <div class="replenishment-panel">
+            <div class="replenishment-header">
+                <div>
+                    <div class="replenishment-title">剩余空间补货推荐</div>
+                    <div class="replenishment-meta">${_escapeReplenishmentHtml(ctx.group.name)} | ${_escapeReplenishmentHtml(ctx.boxType.name)} | ${ctx.group.boxCount} 箱</div>
+                </div>
+                <div class="replenishment-actions">
+                    <button class="btn btn-sm btn-primary" onclick="recalcReplenishment()">重新计算</button>
+                    <button class="btn btn-sm btn-outline" onclick="previewReplenishmentInViewer()">显示推荐件预览</button>
+                    <button class="btn btn-sm btn-outline" onclick="clearReplenishmentPreview()">清除预览</button>
+                </div>
+            </div>
+            <div class="replenishment-source">
+                自动候选：${autoCandidates.length} 个（软包、未分配 SKU、小硬盒彩盒）。可在下方手动添加客户准备订购的小彩盒。
+            </div>
+            <div class="replenishment-manual">
+                <div class="replenishment-subtitle">手动候选小件</div>
+                <div class="replenishment-table-wrap">
+                    <table class="replenishment-candidate-table">
+                        <thead>
+                            <tr>
+                                <th>名称</th><th>长</th><th>宽</th><th>高</th><th>包装</th><th>公差%</th><th>优先级</th><th>最多推荐</th><th></th>
+                            </tr>
+                        </thead>
+                        <tbody>${rowsHtml || '<tr><td colspan="9" class="replenishment-muted">暂无手动候选</td></tr>'}</tbody>
+                    </table>
+                </div>
+                <button class="btn btn-sm btn-outline" onclick="addManualReplenishmentCandidate()">+ 添加候选小彩盒</button>
+            </div>
+            <div class="replenishment-results">${resultHtml}</div>
+        </div>
+    `;
+}
+
+function recalcReplenishment() {
+    updateDataFromTables();
+    const ctx = getCurrentViewerGroupAndBox();
+    if (!ctx) { alert('请先选择一个箱子预览'); return; }
+    _syncManualReplenishmentCandidates();
+
+    const autoCandidates = buildReplenishmentCandidates(skus, mixedGroups, ctx.group, ctx.boxType);
+    const candidates = [...autoCandidates, ..._manualReplenishmentCandidates.map(_manualCandidateToReplenishment)];
+    if (candidates.length === 0) {
+        _lastReplenishmentPlan = null;
+        renderReplenishmentPanel({
+            groupId: ctx.group.id,
+            boxTypeId: ctx.boxType.id,
+            boxCount: ctx.group.boxCount,
+            currentUtilization: 0,
+            projectedUtilization: 0,
+            additions: [],
+            cavitiesBefore: [],
+            cavitiesAfter: [],
+            unusableReasons: ['没有可用于补货推荐的候选小件'],
+            overlayPlacements: [],
+        });
+        return;
+    }
+
+    try {
+        _lastReplenishmentPlan = generateReplenishmentPlan(ctx.group, ctx.boxType, skus, candidates);
+        renderReplenishmentPanel(_lastReplenishmentPlan);
+    } catch (e) {
+        console.error('补货推荐计算异常:', e);
+        const panel = document.getElementById('replenishmentPanel');
+        if (panel) {
+            panel.innerHTML = '<div class="replenishment-panel"><div class="replenishment-error">补货推荐计算失败：' + _escapeReplenishmentHtml(e.message) + '</div></div>';
+        }
+    }
+}
+
+function previewReplenishmentInViewer() {
+    const ctx = getCurrentViewerGroupAndBox();
+    if (!ctx) { alert('请先选择一个箱子预览'); return; }
+    if (!_lastReplenishmentPlan || _lastReplenishmentPlan.groupId !== ctx.group.id) {
+        recalcReplenishment();
+    }
+    if (!_lastReplenishmentPlan || !_lastReplenishmentPlan.overlayPlacements || _lastReplenishmentPlan.overlayPlacements.length === 0) {
+        alert('当前没有可预览的推荐件');
+        return;
+    }
+    if (typeof window.renderReplenishmentOverlay === 'function') {
+        window.renderReplenishmentOverlay(_lastReplenishmentPlan.overlayPlacements, _lastReplenishmentPlan.boxOrientation || ctx.boxType.internal);
+    }
+}
+
+function clearReplenishmentPreview() {
+    if (typeof window.clearReplenishmentOverlay === 'function') window.clearReplenishmentOverlay();
+}
+
+function addManualReplenishmentCandidate() {
+    const ctx = getCurrentViewerGroupAndBox();
+    const boxCount = ctx?.group?.boxCount || CONFIG.defaultMinBoxes;
+    _syncManualReplenishmentCandidates();
+    _manualReplenishmentCandidates.push({
+        id: 'manual_repl_' + (_nextManualReplenishmentId++),
+        name: '候选小彩盒',
+        length: 10,
+        width: 8,
+        height: 3,
+        packagingType: 'soft',
+        softTolerance: 10,
+        priority: 3,
+        maxQty: boxCount * 30,
+    });
+    renderReplenishmentPanel(_lastReplenishmentPlan);
+}
+
+function removeManualReplenishmentCandidate(id) {
+    _syncManualReplenishmentCandidates();
+    _manualReplenishmentCandidates = _manualReplenishmentCandidates.filter(c => c.id !== id);
+    renderReplenishmentPanel(_lastReplenishmentPlan);
+}
+
+function _syncManualReplenishmentCandidates() {
+    const rows = document.querySelectorAll('#replenishmentPanel tr[data-candidate-id]');
+    if (!rows.length) return;
+    const next = [];
+    rows.forEach(row => {
+        const inputs = row.querySelectorAll('input, select');
+        if (inputs.length < 8) return;
+        const name = inputs[0].value.trim();
+        const l = parseFloat(inputs[1].value);
+        const w = parseFloat(inputs[2].value);
+        const h = parseFloat(inputs[3].value);
+        if (!name || !(l > 0) || !(w > 0) || !(h > 0)) return;
+        next.push({
+            id: row.getAttribute('data-candidate-id'),
+            name,
+            length: l,
+            width: w,
+            height: h,
+            packagingType: inputs[4].value,
+            softTolerance: Math.max(0, Math.min(20, parseFloat(inputs[5].value) || 0)),
+            priority: Math.max(1, Math.min(5, parseInt(inputs[6].value) || 3)),
+            maxQty: Math.max(0, parseInt(inputs[7].value) || 0),
+        });
+    });
+    _manualReplenishmentCandidates = next;
+}
+
+function _manualCandidateToReplenishment(c) {
+    return {
+        id: c.id,
+        skuId: c.id,
+        name: c.name,
+        dimensions: dims(c.length, c.width, c.height),
+        packagingType: c.packagingType,
+        softTolerance: c.packagingType === 'soft' ? c.softTolerance / 100 : 0,
+        maxQty: c.maxQty,
+        priority: c.priority,
+        allowStackOnHard: c.packagingType === 'soft',
+        source: '手动候选',
+    };
+}
+
+function _renderManualCandidateRow(c) {
+    return `
+        <tr data-candidate-id="${_escapeReplenishmentHtml(c.id)}">
+            <td><input type="text" value="${_escapeReplenishmentHtml(c.name)}"></td>
+            <td><input type="number" step="0.1" min="0.1" value="${c.length}"></td>
+            <td><input type="number" step="0.1" min="0.1" value="${c.width}"></td>
+            <td><input type="number" step="0.1" min="0.1" value="${c.height}"></td>
+            <td>
+                <select>
+                    <option value="soft" ${c.packagingType === 'soft' ? 'selected' : ''}>软</option>
+                    <option value="hard" ${c.packagingType === 'hard' ? 'selected' : ''}>硬</option>
+                </select>
+            </td>
+            <td><input type="number" step="1" min="0" max="20" value="${c.softTolerance}"></td>
+            <td><input type="number" step="1" min="1" max="5" value="${c.priority}"></td>
+            <td><input type="number" step="1" min="0" value="${c.maxQty}"></td>
+            <td><button class="btn btn-sm btn-danger" onclick="removeManualReplenishmentCandidate('${_escapeReplenishmentHtml(c.id)}')">删除</button></td>
+        </tr>
+    `;
+}
+
+function _renderReplenishmentResult(plan) {
+    const current = _formatPercent(plan.currentUtilization);
+    const projected = _formatPercent(plan.projectedUtilization);
+    const gain = _formatPercent(Math.max(0, plan.projectedUtilization - plan.currentUtilization));
+    let html = `
+        <div class="replenishment-summary">
+            <div><span>当前利用率</span><strong>${current}</strong></div>
+            <div><span>推荐后</span><strong>${projected}</strong></div>
+            <div><span>提升</span><strong>${gain}</strong></div>
+            <div><span>真实空腔</span><strong>${(plan.cavitiesBefore || []).length} 个</strong></div>
+        </div>
+    `;
+
+    if (!plan.additions || plan.additions.length === 0) {
+        html += '<div class="replenishment-empty">未找到可安全放入的补货候选。可以手动添加更小尺寸的小彩盒后重算。</div>';
+    } else {
+        html += `
+            <div class="replenishment-table-wrap">
+                <table class="replenishment-result-table">
+                    <thead>
+                        <tr><th>推荐 SKU</th><th>包装</th><th>每箱建议</th><th>${plan.boxCount}箱合计</th><th>利用率贡献</th><th>摆放区域</th><th>提示</th></tr>
+                    </thead>
+                    <tbody>
+                        ${plan.additions.map(a => `
+                            <tr>
+                                <td>${_escapeReplenishmentHtml(a.name)}</td>
+                                <td>${a.packagingType === 'soft' ? '软包' : '硬盒彩盒'}</td>
+                                <td><strong>${a.qtyPerBox}</strong> 个/箱</td>
+                                <td><strong>${a.totalQty}</strong> 个</td>
+                                <td>${_formatPercent(a.volumeContribution)}</td>
+                                <td>${_escapeReplenishmentHtml(a.placementSummary)}</td>
+                                <td>${(a.warnings || []).map(_escapeReplenishmentHtml).join('；') || '—'}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+
+    if (plan.unusableReasons && plan.unusableReasons.length > 0) {
+        html += '<div class="replenishment-notes"><strong>剩余不可用空间：</strong>' +
+            plan.unusableReasons.map(r => '<span>' + _escapeReplenishmentHtml(r) + '</span>').join('') +
+            '</div>';
+    }
+    return html;
+}
+
+function _formatPercent(v) {
+    if (!Number.isFinite(v)) return '0.0%';
+    return (v * 100).toFixed(1) + '%';
+}
+
+function _escapeReplenishmentHtml(str) {
+    if (str == null) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 // ---- 初始化 ----
@@ -856,6 +1147,7 @@ function refreshViewer() {
                 const c = document.getElementById('viewer-container');
                 if (c) c.innerHTML = '<div class="viewer-empty">选择上方下拉菜单中的箱子查看 3D 布局</div>';
             }
+            _resetReplenishmentPanelForViewer();
             return;
         }
 
@@ -903,6 +1195,7 @@ function refreshViewer() {
 
         loadGroupIntoViewer(group, boxType, result, parseInt(boxIdx), result.cavities);
         _lastViewerContext = { groupId: group.id, boxIdx: parseInt(boxIdx) };
+        _resetReplenishmentPanelForViewer();
         if (_useCavityAlgorithm) {
             _renderCavityDiagnostics(result);
         }
@@ -910,6 +1203,15 @@ function refreshViewer() {
         console.error('refreshViewer 异常:', e);
         const c = document.getElementById('viewer-container');
         if (c) c.innerHTML = '<div class="viewer-empty" style="color:#c62828;">刷新异常: ' + e.message + '</div>';
+    }
+}
+
+function _resetReplenishmentPanelForViewer() {
+    _lastReplenishmentPlan = null;
+    if (typeof window.clearReplenishmentOverlay === 'function') window.clearReplenishmentOverlay();
+    const panel = document.getElementById('replenishmentPanel');
+    if (panel && panel.style.display !== 'none' && panel.innerHTML.trim()) {
+        renderReplenishmentPanel();
     }
 }
 
@@ -1332,4 +1634,3 @@ function exportXlsx() {
         alert('xlsx 导出功能需要 SheetJS 库');
     }
 }
-

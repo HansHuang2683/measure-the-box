@@ -166,6 +166,7 @@ function renderGroup(group, boxType, result, boxIndex, cavities) {
 
     // 清空腔组
     clearCavities();
+    clearReplenishmentOverlay();
 
     // 清场（保留灯光和网格）
     const keep = [];
@@ -1235,6 +1236,7 @@ function updateSandboxToolbar() {
 
 let cavityGroup = null;
 let cavityVisible = false;
+let replenishmentOverlayGroup = null;
 
 /**
  * 在场景中绘制空腔（半透明线框）
@@ -1325,6 +1327,62 @@ function isCavityVisible() {
     return cavityVisible;
 }
 
+// ===== 补货推荐叠加预览 =====
+
+function renderReplenishmentOverlay(placements, boxOrient) {
+    if (!scene || !placements || placements.length === 0 || !boxOrient) return;
+    clearReplenishmentOverlay();
+
+    const scale = 1 / Math.max(boxOrient.length, boxOrient.width, boxOrient.height);
+    const floorL = boxOrient.length * scale;
+    const floorW = boxOrient.width * scale;
+
+    replenishmentOverlayGroup = new THREE.Group();
+
+    for (const p of placements) {
+        const pl = p.length * scale;
+        const pw = p.width * scale;
+        const ph = p.height * scale;
+        if (pl <= 0 || pw <= 0 || ph <= 0) continue;
+
+        const geo = new THREE.BoxGeometry(pl, ph, pw);
+        const mat = new THREE.MeshPhongMaterial({
+            color: 0x22c55e,
+            transparent: true,
+            opacity: 0.45,
+            depthWrite: false,
+            emissive: 0x22c55e,
+            emissiveIntensity: 0.08,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(
+            p.x * scale - floorL / 2 + pl / 2,
+            p.z * scale + ph / 2,
+            p.y * scale - floorW / 2 + pw / 2
+        );
+        replenishmentOverlayGroup.add(mesh);
+
+        const edges = new THREE.EdgesGeometry(geo);
+        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({
+            color: 0x16a34a,
+            transparent: true,
+            opacity: 0.9,
+        }));
+        line.position.copy(mesh.position);
+        replenishmentOverlayGroup.add(line);
+    }
+
+    scene.add(replenishmentOverlayGroup);
+}
+
+function clearReplenishmentOverlay() {
+    if (replenishmentOverlayGroup && scene) {
+        scene.remove(replenishmentOverlayGroup);
+        disposeGroup(replenishmentOverlayGroup);
+    }
+    replenishmentOverlayGroup = null;
+}
+
 // 导出
 window.loadGroupIntoViewer = loadGroupIntoViewer;
 window.showViewerEmpty = showViewerEmpty;
@@ -1341,3 +1399,5 @@ window.sandboxUndo = sandboxUndo;
 window.sandboxRedo = sandboxRedo;
 window.setSandboxAxisMode = setSandboxAxisMode;
 window.onAxisButtonClick = onAxisButtonClick;
+window.renderReplenishmentOverlay = renderReplenishmentOverlay;
+window.clearReplenishmentOverlay = clearReplenishmentOverlay;
