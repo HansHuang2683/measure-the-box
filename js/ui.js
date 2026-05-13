@@ -163,6 +163,7 @@ function renderReplenishmentPanel(plan) {
         ? buildReplenishmentCandidates(skus, mixedGroups, ctx.group, ctx.boxType)
         : [];
     const rowsHtml = _manualReplenishmentCandidates.map(c => _renderManualCandidateRow(c)).join('');
+    const skuPickerHtml = _renderExistingSkuCandidatePicker(ctx);
     const resultHtml = plan ? _renderReplenishmentResult(plan) : '<div class="replenishment-empty">点击“重新计算”后生成每箱补货数量和预计利用率提升。</div>';
 
     panel.innerHTML = `
@@ -183,6 +184,11 @@ function renderReplenishmentPanel(plan) {
             </div>
             <div class="replenishment-manual">
                 <div class="replenishment-subtitle">手动候选小件</div>
+                <div class="replenishment-picker">
+                    ${skuPickerHtml}
+                    <button class="btn btn-sm btn-outline" onclick="addCandidateFromExistingSku()">从已有 SKU 添加</button>
+                    <button class="btn btn-sm btn-outline" onclick="addManualReplenishmentCandidate()">手动填写空白候选</button>
+                </div>
                 <div class="replenishment-table-wrap">
                     <table class="replenishment-candidate-table">
                         <thead>
@@ -193,7 +199,6 @@ function renderReplenishmentPanel(plan) {
                         <tbody>${rowsHtml || '<tr><td colspan="9" class="replenishment-muted">暂无手动候选</td></tr>'}</tbody>
                     </table>
                 </div>
-                <button class="btn btn-sm btn-outline" onclick="addManualReplenishmentCandidate()">+ 添加候选小彩盒</button>
             </div>
             <div class="replenishment-results">${resultHtml}</div>
         </div>
@@ -207,7 +212,8 @@ function recalcReplenishment() {
     _syncManualReplenishmentCandidates();
 
     const autoCandidates = buildReplenishmentCandidates(skus, mixedGroups, ctx.group, ctx.boxType);
-    const candidates = [...autoCandidates, ..._manualReplenishmentCandidates.map(_manualCandidateToReplenishment)];
+    const manualCandidates = _manualReplenishmentCandidates.map(_manualCandidateToReplenishment);
+    const candidates = _mergeReplenishmentCandidates(autoCandidates, manualCandidates);
     if (candidates.length === 0) {
         _lastReplenishmentPlan = null;
         renderReplenishmentPanel({
@@ -274,6 +280,42 @@ function addManualReplenishmentCandidate() {
     renderReplenishmentPanel(_lastReplenishmentPlan);
 }
 
+function addCandidateFromExistingSku() {
+    const ctx = getCurrentViewerGroupAndBox();
+    if (!ctx) { alert('请先选择一个箱子预览'); return; }
+    _syncManualReplenishmentCandidates();
+
+    const select = document.getElementById('existingSkuCandidateSelect');
+    const skuId = select?.value;
+    if (!skuId) {
+        alert('请先选择一个已有 SKU');
+        return;
+    }
+    const sku = skus.find(s => s.id === skuId);
+    if (!sku || !sku.dimensions) return;
+
+    const existing = _manualReplenishmentCandidates.find(c => c.sourceSkuId === sku.id);
+    if (existing) {
+        renderReplenishmentPanel(_lastReplenishmentPlan);
+        return;
+    }
+
+    const boxCount = ctx.group.boxCount || CONFIG.defaultMinBoxes;
+    _manualReplenishmentCandidates.push({
+        id: 'manual_from_sku_' + sku.id + '_' + (_nextManualReplenishmentId++),
+        sourceSkuId: sku.id,
+        name: sku.name,
+        length: sku.dimensions.length,
+        width: sku.dimensions.width,
+        height: sku.dimensions.height,
+        packagingType: sku.packagingType || 'hard',
+        softTolerance: sku.packagingType === 'soft' ? Math.round((sku.softTolerance || 0) * 100) : 0,
+        priority: sku.packagingType === 'soft' ? 3 : 2,
+        maxQty: boxCount * 30,
+    });
+    renderReplenishmentPanel(_lastReplenishmentPlan);
+}
+
 function removeManualReplenishmentCandidate(id) {
     _syncManualReplenishmentCandidates();
     _manualReplenishmentCandidates = _manualReplenishmentCandidates.filter(c => c.id !== id);
@@ -294,6 +336,7 @@ function _syncManualReplenishmentCandidates() {
         if (!name || !(l > 0) || !(w > 0) || !(h > 0)) return;
         next.push({
             id: row.getAttribute('data-candidate-id'),
+            sourceSkuId: row.getAttribute('data-source-sku-id') || '',
             name,
             length: l,
             width: w,
@@ -310,7 +353,7 @@ function _syncManualReplenishmentCandidates() {
 function _manualCandidateToReplenishment(c) {
     return {
         id: c.id,
-        skuId: c.id,
+        skuId: c.sourceSkuId || c.id,
         name: c.name,
         dimensions: dims(c.length, c.width, c.height),
         packagingType: c.packagingType,
@@ -318,13 +361,37 @@ function _manualCandidateToReplenishment(c) {
         maxQty: c.maxQty,
         priority: c.priority,
         allowStackOnHard: c.packagingType === 'soft',
-        source: '手动候选',
+        source: c.sourceSkuId ? '已有SKU尺寸' : '手动候选',
     };
+}
+
+function _mergeReplenishmentCandidates(autoCandidates, manualCandidates) {
+    const manualSkuIds = new Set(
+        (manualCandidates || [])
+            .map(c => c.skuId)
+            .filter(id => id && !String(id).startsWith('manual_repl_'))
+    );
+    const filteredAuto = (autoCandidates || []).filter(c => !manualSkuIds.has(c.skuId));
+    return [...filteredAuto, ...(manualCandidates || [])];
+}
+
+function _renderExistingSkuCandidatePicker(ctx) {
+    const sorted = [...skus].sort((a, b) => dimsVolume(a.dimensions) - dimsVolume(b.dimensions));
+    if (sorted.length === 0) {
+        return '<select id="existingSkuCandidateSelect" disabled><option value="">暂无 SKU</option></select>';
+    }
+    const options = sorted.map(s => {
+        const pkg = s.packagingType === 'soft' ? '软' : '硬';
+        const tol = s.packagingType === 'soft' && s.softTolerance ? ', 公差' + Math.round(s.softTolerance * 100) + '%' : '';
+        const label = `${s.name} (${formatDims(s.dimensions)} cm, ${pkg}${tol})`;
+        return `<option value="${_escapeReplenishmentHtml(s.id)}">${_escapeReplenishmentHtml(label)}</option>`;
+    }).join('');
+    return `<select id="existingSkuCandidateSelect" class="replenishment-existing-select">${options}</select>`;
 }
 
 function _renderManualCandidateRow(c) {
     return `
-        <tr data-candidate-id="${_escapeReplenishmentHtml(c.id)}">
+        <tr data-candidate-id="${_escapeReplenishmentHtml(c.id)}" data-source-sku-id="${_escapeReplenishmentHtml(c.sourceSkuId || '')}">
             <td><input type="text" value="${_escapeReplenishmentHtml(c.name)}"></td>
             <td><input type="number" step="0.1" min="0.1" value="${c.length}"></td>
             <td><input type="number" step="0.1" min="0.1" value="${c.width}"></td>
