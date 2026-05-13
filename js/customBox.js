@@ -294,11 +294,11 @@ function _trySoftFiller(softItem, hardPlan, maxSide) {
 function _suggestSoftMixedBox(softItems, gap, maxSide, wallThickness) {
     if (softItems.length === 0) return null;
 
-    // 取最大的软包装尺寸做基准
+    // 取最大的软包装尺寸做基准（压缩后尺寸）
     const maxDims = softItems.reduce((acc, item) => ({
-        length: Math.max(acc.length, item.dims.length),
-        width: Math.max(acc.width, item.dims.width),
-        height: Math.max(acc.height, item.dims.height),
+        length: Math.max(acc.length, Math.max(0.1, item.dims.length - SOFT_COMPRESS)),
+        width: Math.max(acc.width, Math.max(0.1, item.dims.width - SOFT_COMPRESS)),
+        height: Math.max(acc.height, Math.max(0.1, item.dims.height - SOFT_COMPRESS)),
     }), { length: 0, width: 0, height: 0 });
 
     const totalQty = softItems.reduce((s, item) => s + item.qty, 0);
@@ -696,9 +696,9 @@ function _designSoftMixedBoxAll(softSkus, gap, maxSide) {
     if (totalQty === 0) return null;
 
     const maxDims = softSkus.reduce((acc, sku) => ({
-        length: Math.max(acc.length, sku.dims.length),
-        width: Math.max(acc.width, sku.dims.width),
-        height: Math.max(acc.height, sku.dims.height),
+        length: Math.max(acc.length, Math.max(0.1, sku.dims.length - SOFT_COMPRESS)),
+        width: Math.max(acc.width, Math.max(0.1, sku.dims.width - SOFT_COMPRESS)),
+        height: Math.max(acc.height, Math.max(0.1, sku.dims.height - SOFT_COMPRESS)),
     }), { length: 0, width: 0, height: 0 });
 
     const orientations = generateOrientations(maxDims);

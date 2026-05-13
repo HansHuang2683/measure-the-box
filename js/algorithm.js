@@ -59,12 +59,22 @@ function calcAllSKUsInBox(skus, boxInternal, gap) {
  * 获取SKU的有效尺寸（考虑软包装公差）
  */
 function getEffectiveDimensions(sku) {
-    if (sku.packagingType === 'soft' && sku.softTolerance > 0) {
-        const scale = Math.pow(1 - sku.softTolerance, 1 / 3);
+    if (sku.packagingType === 'soft') {
+        // 用户自定义公差 > 0 → 百分比立方缩放
+        if (sku.softTolerance && sku.softTolerance > 0) {
+            const scale = Math.pow(1 - sku.softTolerance, 1 / 3);
+            return {
+                length: sku.dimensions.length * scale,
+                width: sku.dimensions.width * scale,
+                height: sku.dimensions.height * scale,
+            };
+        }
+        // 默认 → -2cm 平减
+        const c = CONFIG.softCompress || 2.0;
         return {
-            length: sku.dimensions.length * scale,
-            width: sku.dimensions.width * scale,
-            height: sku.dimensions.height * scale,
+            length: Math.max(0.1, sku.dimensions.length - c),
+            width: Math.max(0.1, sku.dimensions.width - c),
+            height: Math.max(0.1, sku.dimensions.height - c),
         };
     }
     return sku.dimensions;

@@ -3,3 +3,6 @@ node_modules/
 Thumbs.db
 *.log
 .vscode/
+backend/fba_packing.db
+backend/__pycache__/
+*.pyc

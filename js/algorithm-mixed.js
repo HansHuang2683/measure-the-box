@@ -94,22 +94,24 @@ function generateMixedLayout(group, skus, boxInternal) {
     const totalVol = items.reduce((sum, item) => sum + dimsVolume(item.dims), 0);
     const boxVol = dimsVolume(boxInternal);
 
+    let result;
     if (totalVol > boxVol) {
-        // 体积超了，但也尝试生成部分排列用于可视化
         const partial = shelfLevelPacking(items, boxInternal, true);
-        return makeResult(PACKING_STATUS.IMPOSSIBLE, totalVol, boxVol, 0,
+        result = makeResult(PACKING_STATUS.IMPOSSIBLE, totalVol, boxVol, 0,
             `产品总体积(${totalVol.toFixed(0)}cm³)超过箱内容积(${boxVol.toFixed(0)}cm³)`,
             partial.layers);
+        result.overflowItems = partial.unplaced || (partial.layers.length === 0 ? items : []);
+        return result;
     }
 
-    // 尝试完整排列
     const fullResult = shelfLevelPacking(items, boxInternal, false);
     if (fullResult.success) {
-        return makeResult(PACKING_STATUS.VERIFIED, totalVol, boxVol, totalVol / boxVol,
+        result = makeResult(PACKING_STATUS.VERIFIED, totalVol, boxVol, totalVol / boxVol,
             '层架算法验证通过', fullResult.layers);
+        result.overflowItems = [];
+        return result;
     }
 
-    // 完整排列失败，用部分排列数据做可视化
     const partial = shelfLevelPacking(items, boxInternal, true);
     const packingType = classifyMixType(items);
     const factor = PACKING_FACTORS[packingType] || 0.65;
@@ -124,7 +126,9 @@ function generateMixedLayout(group, skus, boxInternal) {
         msg = `超出估算容量 — 部分排列可视化`;
     }
 
-    return makeResult(status, totalVol, boxVol, totalVol / boxVol, msg, partial.layers);
+    result = makeResult(status, totalVol, boxVol, totalVol / boxVol, msg, partial.layers);
+    result.overflowItems = partial.unplaced || (partial.layers.length === 0 ? items : []);
+    return result;
 }
 
 // ===== 层架算法 =====
@@ -546,6 +550,7 @@ function generateMixedLayoutCavity(group, skus, boxInternal) {
             cavities: cavityResult.cavities || [],
             diagnostics: cavityResult.diagnostics || null,
             phase2Stats: cavityResult.phase2Stats || null,
+            overflowItems: cavityResult.unplaced || (cavityResult.layers.length === 0 ? items : []),
         });
     }
 
@@ -583,6 +588,7 @@ function generateMixedLayoutCavity(group, skus, boxInternal) {
         cavities: cavityResult.cavities || [],
         diagnostics: cavityResult.diagnostics || null,
         phase2Stats: cavityResult.phase2Stats || null,
+        overflowItems: cavityResult.unplaced || (cavityResult.layers.length === 0 ? items : []),
     });
 }
 

@@ -234,6 +234,42 @@ function renderGroup(group, boxType, result, boxIndex, cavities) {
         }
     }
 
+    // 溢出产品（装不下，半透明浮在箱子上面）
+    if (result.overflowItems && result.overflowItems.length > 0) {
+        const gridCols = Math.max(1, Math.ceil(Math.sqrt(result.overflowItems.length * 2)));
+        const gridRows = Math.ceil(result.overflowItems.length / gridCols);
+        const cellW = floorL / gridCols;
+        const cellD = floorW / gridRows;
+
+        result.overflowItems.forEach((item, idx) => {
+            const il = item.dims.length * scale;
+            const iw = item.dims.width * scale;
+            const ih = item.dims.height * scale;
+            if (il <= 0 || iw <= 0 || ih <= 0) return;
+
+            const col = idx % gridCols;
+            const row = Math.floor(idx / gridCols);
+            const px = -floorL / 2 + col * cellW + (cellW - il) / 2;
+            const pz = -floorW / 2 + row * cellD + (cellD - iw) / 2;
+            const py = boxH + 0.02;
+
+            const geo = new THREE.BoxGeometry(il, ih, iw);
+            const mat = new THREE.MeshPhongMaterial({
+                color: 0x4F6EF7, transparent: true, opacity: 0.25,
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(px + il / 2, py + ih / 2, pz + iw / 2);
+            scene.add(mesh);
+
+            const edges = new THREE.EdgesGeometry(geo);
+            const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({
+                color: 0xff4444, transparent: true, opacity: 0.5,
+            }));
+            line.position.copy(mesh.position);
+            scene.add(line);
+        });
+    }
+
     // 产品信息面板（非沙盘模式）
     buildNonSandboxPanel(result, boxOrient);
 
@@ -430,7 +466,7 @@ let sandboxAxisMode = 'direction';
 let sandboxActiveAxis = null;    // 'x' | 'y' | 'z' | null
 let sandboxDragStartPos = null;  // 用于方向模式轴约束拖拽
 
-function enterSandboxMode(items, boxInternal, layers) {
+function enterSandboxMode(items, boxInternal, layers, overflowItems) {
     // 先退出已有沙盘，确保 ensureViewer 能重新初始化场景
     if (sandboxActive) exitSandboxMode();
 
@@ -480,6 +516,23 @@ function enterSandboxMode(items, boxInternal, layers) {
         boxLine.position.set(0, refH / 2, 0);
         scene.add(boxLine);
 
+        // 地板参考网格（5cm 间隔，对齐 1cm 吸附）
+        const gridStep = 5 * sandboxScale;
+        const gridMat = new THREE.LineBasicMaterial({ color: 0x1a73e8, transparent: true, opacity: 0.07 });
+        const gridMatMinor = new THREE.LineBasicMaterial({ color: 0x1a73e8, transparent: true, opacity: 0.03 });
+        for (let x = -refL / 2; x <= refL / 2 + 0.001; x += gridStep) {
+            const isMajor = Math.abs(Math.round(x / (gridStep * 2)) * (gridStep * 2) - x) < 0.001;
+            const mat = isMajor ? gridMat : gridMatMinor;
+            const pts = [new THREE.Vector3(x, 0.002, -refW / 2), new THREE.Vector3(x, 0.002, refW / 2)];
+            scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat));
+        }
+        for (let z = -refW / 2; z <= refW / 2 + 0.001; z += gridStep) {
+            const isMajor = Math.abs(Math.round(z / (gridStep * 2)) * (gridStep * 2) - z) < 0.001;
+            const mat = isMajor ? gridMat : gridMatMinor;
+            const pts = [new THREE.Vector3(-refL / 2, 0.002, z), new THREE.Vector3(refL / 2, 0.002, z)];
+            scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat));
+        }
+
         // 不画外箱！只画产品
         sandboxItemMeshes = [];
         const skuColorMap = new Map();
@@ -510,7 +563,41 @@ function enterSandboxMode(items, boxInternal, layers) {
             }
         }
 
-        if (allItems.length === 0) {
+        // 添加溢出产品到沙盘（实体、可拖动）
+        let overflowCount = 0;
+        if (overflowItems && overflowItems.length > 0) {
+            const gridCols = Math.max(1, Math.ceil(Math.sqrt(overflowItems.length * 2)));
+            const gridRows = Math.ceil(overflowItems.length / gridCols);
+            const cellW = refL / gridCols;
+            const cellD = refW / gridRows;
+
+            overflowItems.forEach((item, idx) => {
+                const il = item.dims.length * sandboxScale;
+                const iw = item.dims.width * sandboxScale;
+                const ih = item.dims.height * sandboxScale;
+                if (il <= 0 || iw <= 0 || ih <= 0) return;
+
+                if (!skuColorMap.has(item.skuId)) skuColorMap.set(item.skuId, getSkuColor(ci++));
+
+                const col = idx % gridCols;
+                const row = Math.floor(idx / gridCols);
+                const px = -refL / 2 + col * cellW + (cellW - il) / 2 + il / 2;
+                const pz = -refW / 2 + row * cellD + (cellD - iw) / 2 + iw / 2;
+                const py = refH + ih / 2 + 0.05;
+
+                const color = skuColorMap.get(item.skuId) || 0x999999;
+                const mesh = createDraggableProduct(il, iw, ih, color, item.skuName || '未知');
+                mesh.position.set(px, py, pz);
+                mesh.userData.skuId = item.skuId;
+                mesh.userData.dimsCm = { l: item.dims.length, w: item.dims.width, h: item.dims.height };
+                mesh.userData.originalDims = item.originalDims || null;
+                scene.add(mesh);
+                sandboxItemMeshes.push(mesh);
+                overflowCount++;
+            });
+        }
+
+        if (allItems.length === 0 && sandboxItemMeshes.length === 0) {
             showViewerEmpty();
             return;
         }
@@ -542,6 +629,10 @@ function enterSandboxMode(items, boxInternal, layers) {
                 sandboxDragControls.addEventListener('dragstart', (event) => {
                     if (controls) controls.enabled = false;
                     if (sandboxSelected) deselectItem();
+                    // 保存拖拽前的状态到撤销栈
+                    sandboxUndoStack.push(saveSandboxState());
+                    if (sandboxUndoStack.length > SANDBOX_MAX_UNDO) sandboxUndoStack.shift();
+                    sandboxRedoStack = [];
                     // 记录拖拽起始位置，用于方向模式轴约束
                     if (event && event.object) {
                         sandboxDragStartPos = event.object.position.clone();
@@ -559,24 +650,33 @@ function enterSandboxMode(items, boxInternal, layers) {
                         );
                         let proj = delta.dot(axisVec);
                         if (sandboxSnapEnabled) {
-                            const snapUnit = 0.3 * sandboxScale;
+                            const snapUnit = 0.5 * sandboxScale;
                             proj = Math.round(proj / snapUnit) * snapUnit;
                         }
                         pos.copy(sandboxDragStartPos);
                         pos.x += axisVec.x * proj;
                         pos.y += axisVec.y * proj;
                         pos.z += axisVec.z * proj;
+                        // 沿约束轴做边缘吸附
+                        if (sandboxSnapEnabled) {
+                            snapToItems(event.object, 0.6);
+                        }
                     } else if (sandboxSnapEnabled) {
-                        // 以 ~3mm 为步长吸附（用 sandboxScale 换算），防止粗颗粒度导致产品重叠
-                        const snapUnit = 0.3 * sandboxScale;
+                        // 0.5cm 步长吸附，三轴统一
+                        const snapUnit = 0.5 * sandboxScale;
                         event.object.position.x = Math.round(event.object.position.x / snapUnit) * snapUnit;
+                        event.object.position.y = Math.round(event.object.position.y / snapUnit) * snapUnit;
                         event.object.position.z = Math.round(event.object.position.z / snapUnit) * snapUnit;
+                        // 边缘吸附：靠近其他彩盒或箱壁时自动贴紧
+                        snapToItems(event.object, 0.6);
                     }
                     recalcBoundingBox(boxInternal);
+                    refreshOverlapState();
                 });
                 sandboxDragControls.addEventListener('dragend', () => {
                     if (controls) controls.enabled = true;
                     recalcBoundingBox(boxInternal);
+                    refreshOverlapState();
                     sandboxDragStartPos = null;
                 });
             } catch(e) {}
@@ -671,7 +771,7 @@ function createDraggableProduct(pl, pw, ph, color, name) {
     line.raycast = () => {}; // 禁止射线检测，防止 DragControls 选中线框而非 Mesh
     mesh.add(line);
 
-    mesh.userData = { name, skuName: name };
+    mesh.userData = { name, skuName: name, origColor: color, origEmissive: color };
     return mesh;
 }
 
@@ -698,6 +798,85 @@ function recalcBoundingBox(boxInternal) {
     }
     // 更新产品面板
     if (sandboxProductPanel) updateProductPanel();
+}
+
+/**
+ * 边缘吸附：拖拽时靠近其他彩盒或箱壁，自动对齐贴紧（零缝隙零重叠）
+ * 每个轴独立计算，找到最近的面对齐位置
+ * @param {Object} draggedMesh - 当前拖拽的 Mesh
+ * @param {number} thresholdCm - 触发吸附的距离阈值(cm)
+ */
+function snapToItems(draggedMesh, thresholdCm) {
+    if (!sandboxActive || sandboxItemMeshes.length < 2 || !sandboxOuterBoxDims) return;
+    const s = sandboxScale;
+    const thresh = thresholdCm * s;
+    const halfL = sandboxOuterBoxDims.length * s / 2;
+    const halfW = sandboxOuterBoxDims.width * s / 2;
+    const boxH = sandboxOuterBoxDims.height * s;
+
+    const dBox = new THREE.Box3().setFromObject(draggedMesh);
+    const dHalf = new THREE.Vector3(
+        (dBox.max.x - dBox.min.x) / 2,
+        (dBox.max.y - dBox.min.y) / 2,
+        (dBox.max.z - dBox.min.z) / 2
+    );
+
+    // 每轴独立跟踪最近的有效对齐位置
+    let snapX = null, snapY = null, snapZ = null;
+    let bestX = thresh, bestY = thresh, bestZ = thresh;
+
+    // 1) 与其他彩盒的边缘对齐
+    for (const other of sandboxItemMeshes) {
+        if (other === draggedMesh) continue;
+        const oBox = new THREE.Box3().setFromObject(other);
+
+        // X: 我的左面 → 对方的右面 / 我的右面 → 对方的左面
+        let d = Math.abs(dBox.min.x - oBox.max.x);
+        if (d < bestX) { bestX = d; snapX = oBox.max.x + dHalf.x; }
+        d = Math.abs(dBox.max.x - oBox.min.x);
+        if (d < bestX) { bestX = d; snapX = oBox.min.x - dHalf.x; }
+
+        // Y: 我的底面 → 对方的顶面 / 我的顶面 → 对方的底面
+        d = Math.abs(dBox.min.y - oBox.max.y);
+        if (d < bestY) { bestY = d; snapY = oBox.max.y + dHalf.y; }
+        d = Math.abs(dBox.max.y - oBox.min.y);
+        if (d < bestY) { bestY = d; snapY = oBox.min.y - dHalf.y; }
+
+        // Z: 我的前面 → 对方的后面 / 我的后面 → 对方的前面
+        d = Math.abs(dBox.min.z - oBox.max.z);
+        if (d < bestZ) { bestZ = d; snapZ = oBox.max.z + dHalf.z; }
+        d = Math.abs(dBox.max.z - oBox.min.z);
+        if (d < bestZ) { bestZ = d; snapZ = oBox.min.z - dHalf.z; }
+    }
+
+    // 2) 与箱壁的对齐
+    let d = Math.abs(dBox.min.x - (-halfL));
+    if (d < bestX) { bestX = d; snapX = -halfL + dHalf.x; }
+    d = Math.abs(dBox.max.x - halfL);
+    if (d < bestX) { bestX = d; snapX = halfL - dHalf.x; }
+
+    d = Math.abs(dBox.min.y - 0);
+    if (d < bestY) { bestY = d; snapY = dHalf.y; }
+    d = Math.abs(dBox.max.y - boxH);
+    if (d < bestY) { bestY = d; snapY = boxH - dHalf.y; }
+
+    d = Math.abs(dBox.min.z - (-halfW));
+    if (d < bestZ) { bestZ = d; snapZ = -halfW + dHalf.z; }
+    d = Math.abs(dBox.max.z - halfW);
+    if (d < bestZ) { bestZ = d; snapZ = halfW - dHalf.z; }
+
+    // 应用吸附（每轴独立）
+    if (snapX !== null) draggedMesh.position.x = snapX;
+    if (snapY !== null) draggedMesh.position.y = snapY;
+    if (snapZ !== null) draggedMesh.position.z = snapZ;
+}
+
+/**
+ * 检测所有沙盘物品之间的碰撞重叠，并将重叠物品标记为红色
+ */
+function refreshOverlapState() {
+    // 已移除红色入侵标识 — 保持产品原始颜色
+    return;
 }
 
 function sandbox_onPointerDown(e) {
@@ -767,6 +946,7 @@ function clearSelection() {
     }
     sandboxSelection = [];
     sandboxSelected = null;
+    refreshOverlapState();
 }
 
 function applySelectionHighlight() {
@@ -778,6 +958,7 @@ function applySelectionHighlight() {
             obj.material.emissiveIntensity = 0.08;
         }
     }
+    refreshOverlapState();
 }
 
 function deselectItem() {
@@ -843,6 +1024,7 @@ function restoreSandboxState(state) {
         }
     }
     recalcBoundingBox(sandboxOuterBoxDims);
+    refreshOverlapState();
     if (sandboxProductPanel) updateProductPanel();
 }
 
@@ -864,6 +1046,7 @@ function rotateSandboxItem(axis, sign) {
     sandboxSelected.quaternion.multiply(quat);
 
     recalcBoundingBox(sandboxOuterBoxDims);
+    refreshOverlapState();
     if (sandboxProductPanel) updateProductPanel();
     updateSandboxToolbar();
 }
@@ -886,10 +1069,10 @@ function sandboxRedo() {
 
 function sandbox_onKeyDown(e) {
     if (!sandboxActive) return;
-    if (e.ctrlKey && e.key === 'z') {
+    if (e.ctrlKey && (e.key === 'z' || e.key === 'Z')) {
         e.preventDefault();
         sandboxUndo();
-    } else if (e.ctrlKey && e.key === 'y') {
+    } else if (e.ctrlKey && (e.key === 'y' || e.key === 'Y')) {
         e.preventDefault();
         sandboxRedo();
     }

@@ -4,7 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FBA 装箱优化工具</title>
-    <link rel="stylesheet" href="css/style.css?v=3">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css?v=5">
     <!-- CDN 依赖 -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -69,6 +72,7 @@
                 </select>
             </div>
             <button class="btn btn-primary" style="align-self:flex-end;" onclick="addSelectedStdBox()">+ 添加</button>
+            <button class="btn btn-outline" style="align-self:flex-end;" onclick="addAllStdBoxes()">一键添加所有箱型</button>
             <div class="form-group" style="min-width:70px;">
                 <label>或自定义长</label>
                 <input type="number" id="custBoxL" step="0.1" min="0.1" placeholder="长" style="width:100%;">
@@ -157,9 +161,11 @@
 <script src="js/algorithm-mixed.js?v=2"></script>
 <script src="js/algorithm-cavity.js?v=3"></script>
 <script src="js/distribution.js"></script>
-<script src="js/customBox.js"></script>
+<script src="js/customBox.js?v=2"></script>
 <script src="js/xlsxHandler.js"></script>
-<script src="js/renderer3d.js?v=11"></script>
+<script src="js/renderer3d.js?v=12"></script>
 <script src="js/ui.js?v=2"></script>
+<script src="js/draft.js"></script>
+	<script src="js/auth.js"></script>
 </body>
 </html>

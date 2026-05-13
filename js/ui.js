@@ -340,6 +340,21 @@ function addSelectedStdBox() {
     select.value = '';
 }
 
+function addAllStdBoxes() {
+    const added = [];
+    for (const size of STANDARD_BOX_SIZES) {
+        const name = `${size[0]}×${size[1]}×${size[2]}`;
+        if (boxTypes.some(b => b.name === name)) continue;
+        addBoxRow({ name, length: String(size[0]), width: String(size[1]), height: String(size[2]), wall: CONFIG.defaultWallThickness });
+        added.push(name);
+    }
+    if (added.length === 0) {
+        alert('所有标准箱型已添加');
+    } else {
+        populateStdBoxSelect();
+    }
+}
+
 function addCustomBox() {
     const l = parseFloat(document.getElementById('custBoxL')?.value);
     const w = parseFloat(document.getElementById('custBoxW')?.value);
@@ -506,12 +521,12 @@ function calcSkuRemaining(sku, group) {
 
 function updateGroupBoxType(groupId, boxTypeId) {
     const group = mixedGroups.find(g => g.id === groupId);
-    if (group) { group.boxTypeId = boxTypeId; renderGroups(); }
+    if (group) { group.boxTypeId = boxTypeId; renderGroups(); _autoRefreshViewer(groupId); }
 }
 
 function updateGroupBoxCount(groupId, val) {
     const group = mixedGroups.find(g => g.id === groupId);
-    if (group) { group.boxCount = parseInt(val) || CONFIG.defaultMinBoxes; renderGroups(); }
+    if (group) { group.boxCount = parseInt(val) || CONFIG.defaultMinBoxes; renderGroups(); _autoRefreshViewer(groupId); }
 }
 
 function updateAssignmentQty(groupId, idx, val) {
@@ -519,7 +534,20 @@ function updateAssignmentQty(groupId, idx, val) {
     if (group && group.assignments[idx]) {
         group.assignments[idx].qtyPerBox = Math.max(0, parseInt(val) || 0);
         renderGroups();
+        _autoRefreshViewer(groupId);
     }
+}
+
+/** 如果3D查看器正在显示该组，自动刷新 */
+function _autoRefreshViewer(groupId) {
+    if (!_lastViewerContext || _lastViewerContext.groupId !== groupId) return;
+    const select = document.getElementById('viewerSelect');
+    if (!select) return;
+    const optVal = groupId + '|' + _lastViewerContext.boxIdx;
+    const opt = select.querySelector('option[value="' + optVal + '"]');
+    if (!opt) return;
+    select.value = optVal;
+    refreshViewer();
 }
 
 function removeAssignment(groupId, idx) {
@@ -942,7 +970,7 @@ function onEnterSandbox() {
     if (!group || !boxType) return;
 
     const result = _getLayoutResult(group, boxType);
-    if (result.impossible && result.layers.length === 0) {
+    if ((result.impossible && result.layers.length === 0 && (!result.overflowItems || result.overflowItems.length === 0))) {
         alert('此混装组无布局数据，无法进入沙盘模式');
         return;
     }
@@ -950,7 +978,7 @@ function onEnterSandbox() {
     const diag = document.getElementById('cavityDiagnostics');
     if (diag) diag.style.display = 'none';
     if (typeof enterSandboxMode === 'function') {
-        enterSandboxMode([], boxType.internal, result.layers);
+        enterSandboxMode([], boxType.internal, result.layers, result.overflowItems);
     }
 }
 
@@ -983,36 +1011,95 @@ function loadDemoData() {
     document.getElementById('resultsSection').style.display = 'block';
 }
 
-// ===== 自动分配 =====
+// ===== 自动分配辅助函数 =====
 
-function autoCreateGroups() {
-    updateDataFromTables();
-    if (skus.length === 0 || boxTypes.length === 0) {
-        alert('请先添加 SKU 和箱子类型');
-        return;
-    }
-
-    mixedGroups = [];
-    const totalQty = skus.reduce((s, sk) => s + sk.quantity, 0);
-
-    // 根据包装类型确定实际可达的最高容积利用率
-    const hasHard = skus.some(s => s.packagingType === 'hard');
-    const hasSoft = skus.some(s => s.packagingType === 'soft');
-    let maxUtil;
-    if (hasHard && hasSoft) maxUtil = 0.75;
-    else if (hasHard) maxUtil = 0.85;
-    else maxUtil = 0.90;
-
+/**
+ * 为单个SKU找到最优的每箱分配数量
+ * 策略：floor优先，ceil次之，最后尝试qtyPerBox=1（小批量SKU）
+ */
+function _findBestPerBox(sku, n, cap) {
+    if (cap <= 0) return null;
+    const qty = sku.quantity;
     const candidates = [];
 
-    for (const bt of boxTypes) {
+    // Strategy 1: floor-based（不超量）
+    const perBoxFloor = Math.min(cap, Math.floor(qty / n));
+    if (perBoxFloor > 0) {
+        const alloc = perBoxFloor * n;
+        candidates.push({ qtyPerBox: perBoxFloor, allocated: alloc, remainder: Math.max(0, qty - alloc) });
+    }
+
+    // Strategy 2: ceil-based（略超量，但浪费<1个时不放弃）
+    const perBoxCeil = Math.min(cap, Math.ceil(qty / n));
+    if (perBoxCeil > perBoxFloor) {
+        const alloc = perBoxCeil * n;
+        if (alloc <= qty) {
+            candidates.push({ qtyPerBox: perBoxCeil, allocated: alloc, remainder: qty - alloc });
+        } else if (alloc - qty <= 1) {
+            candidates.push({ qtyPerBox: perBoxCeil, allocated: qty, remainder: 0 });
+        }
+    }
+
+    // Strategy 3: qtyPerBox=1（小批量SKU，只用部分箱子）
+    if (perBoxFloor === 0 && cap >= 1 && qty > 0) {
+        candidates.push({ qtyPerBox: 1, allocated: Math.min(n, qty), remainder: Math.max(0, qty - n) });
+    }
+
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => b.allocated - a.allocated || a.remainder - b.remainder);
+    return candidates[0];
+}
+
+/**
+ * 从候选方案列表中按评分排序，依次验证，返回第一个可行的
+ */
+function _validateAndPickBest(candidates, allSkus) {
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => b.score - a.score);
+    for (const cand of candidates) {
+        const tempGroup = {
+            id: 'temp', name: 'temp',
+            boxTypeId: cand.bt.id, boxCount: cand.n,
+            assignments: cand.assignments,
+        };
+        const validation = validateMixedGroup(tempGroup, allSkus, cand.bt.internal);
+        if (!validation.impossible) return cand;
+    }
+    return candidates[0]; // fallback
+}
+
+/**
+ * 计算所有SKU在分配后的剩余数量总和（封顶）
+ */
+function _calcRemainder(assignments, n, allSkus) {
+    const skuMap = {};
+    for (const s of allSkus) skuMap[s.id] = s;
+    let rem = 0;
+    for (const a of assignments) {
+        const sku = skuMap[a.skuId];
+        if (!sku) continue;
+        const used = Math.min(sku.quantity, a.qtyPerBox * n);
+        rem += Math.max(0, sku.quantity - used);
+    }
+    return rem;
+}
+
+/**
+ * 生成候选方案（纯硬包装或纯软包装）
+ */
+function _generateCandidates(skusList, allBoxTypes, allSkus, maxUtil) {
+    const candidates = [];
+    const totalQty = skusList.reduce((s, sk) => s + sk.quantity, 0);
+    if (totalQty === 0) return candidates;
+
+    for (const bt of allBoxTypes) {
         const boxVol = dimsVolume(bt.internal);
         if (boxVol <= 0) continue;
 
-        // 计算每个SKU在此箱中的单箱最大容量
+        // 计算容量
         const capacities = {};
         let anyFits = false;
-        for (const sku of skus) {
+        for (const sku of skusList) {
             const effDims = getEffectiveDimensions(sku);
             if (!canFitInBox(effDims, bt.internal)) {
                 capacities[sku.id] = 0; continue;
@@ -1025,24 +1112,23 @@ function autoCreateGroups() {
 
         for (let n = CONFIG.defaultMinBoxes; n <= CONFIG.maxBoxesToTry; n++) {
             const assignments = [];
-            let allocQty = 0, volPerBox = 0;
+            let volPerBox = 0;
 
-            for (const sku of skus) {
+            for (const sku of skusList) {
                 const cap = capacities[sku.id] || 0;
                 if (cap === 0) continue;
-                const perBox = Math.min(cap, Math.floor(sku.quantity / n));
-                if (perBox <= 0) continue;
-                assignments.push({ skuId: sku.id, qtyPerBox: perBox });
-                allocQty += perBox * n;
-                volPerBox += perBox * dimsVolume(getEffectiveDimensions(sku));
+                const best = _findBestPerBox(sku, n, cap);
+                if (!best || best.qtyPerBox <= 0) continue;
+                assignments.push({ skuId: sku.id, qtyPerBox: best.qtyPerBox });
+                volPerBox += best.qtyPerBox * dimsVolume(getEffectiveDimensions(sku));
             }
             if (assignments.length === 0) continue;
 
-            const remainRatio = (totalQty - allocQty) / totalQty;
+            const remainder = _calcRemainder(assignments, n, skusList);
+            const remainRatio = remainder / totalQty;
             if (remainRatio > 0.30) continue;
 
             const volUtil = volPerBox / boxVol;
-            // 超过 maxUtil 的部分对评分没有贡献
             let score = Math.min(volUtil, maxUtil) * (1 - remainRatio);
             if (remainRatio <= 0.15) score *= 1.2;
             if (n <= 10) score *= 1.1;
@@ -1050,43 +1136,158 @@ function autoCreateGroups() {
             candidates.push({ bt, n, assignments, remainRatio, volUtil, score });
         }
     }
+    return candidates;
+}
 
-    if (candidates.length === 0) {
-        alert('无法找到合适的装箱方案，请检查产品尺寸是否过大');
+// ===== 自动分配 =====
+
+function autoCreateGroups() {
+    updateDataFromTables();
+    if (skus.length === 0 || boxTypes.length === 0) {
+        alert('请先添加 SKU 和箱子类型');
         return;
     }
 
-    // 按评分降序排列，依次验证直到找到可行方案
-    candidates.sort((a, b) => b.score - a.score);
-    let bestSoln = null;
+    mixedGroups = [];
 
-    for (const cand of candidates) {
-        const tempGroup = {
-            id: 'temp',
-            name: 'temp',
-            boxTypeId: cand.bt.id,
-            boxCount: cand.n,
-            assignments: cand.assignments,
-        };
-        const validation = validateMixedGroup(tempGroup, skus, cand.bt.internal);
-        if (!validation.impossible) {
-            bestSoln = cand;
-            break;
+    const hasHard = skus.some(s => s.packagingType === 'hard');
+    const hasSoft = skus.some(s => s.packagingType === 'soft');
+    const hardSkus = skus.filter(s => s.packagingType === 'hard');
+    const softSkus = skus.filter(s => s.packagingType === 'soft');
+
+    // ───────────────────────────────────────────
+    // 情况1：纯硬包装 或 纯软包装 → 单阶段
+    // ───────────────────────────────────────────
+    if (!hasHard || !hasSoft) {
+        const maxUtil = hasHard ? 0.85 : 0.90;
+        const candidates = _generateCandidates(skus, boxTypes, skus, maxUtil);
+        if (candidates.length === 0) {
+            alert('无法找到合适的装箱方案，请检查产品尺寸是否过大');
+            return;
+        }
+        const best = _validateAndPickBest(candidates, skus);
+        mixedGroups.push({
+            id: genGroupId(),
+            name: `自动混装 (${best.bt.name}, ${best.n}箱, 利用率${(best.volUtil*100).toFixed(0)}%)`,
+            boxTypeId: best.bt.id,
+            boxCount: best.n,
+            assignments: best.assignments,
+        });
+        renderGroups();
+        document.getElementById('resultsSection').style.display = 'block';
+        return;
+    }
+
+    // ───────────────────────────────────────────
+    // 情况2：硬+软混合 → 先硬后软两阶段
+    // ───────────────────────────────────────────
+
+    const totalQty = skus.reduce((s, sk) => s + sk.quantity, 0);
+
+    // Phase 1: 硬包装候选方案
+    const hardCandidates = _generateCandidates(hardSkus, boxTypes, skus, 0.85);
+    if (hardCandidates.length === 0) {
+        // 硬包装没有合适方案 → 回退到全部SKU一起算
+        const fallbackCandidates = _generateCandidates(skus, boxTypes, skus, 0.75);
+        if (fallbackCandidates.length === 0) {
+            alert('无法找到合适的装箱方案，请检查产品尺寸是否过大');
+            return;
+        }
+        const best = _validateAndPickBest(fallbackCandidates, skus);
+        mixedGroups.push({
+            id: genGroupId(),
+            name: `自动混装 (${best.bt.name}, ${best.n}箱, 利用率${(best.volUtil*100).toFixed(0)}%)`,
+            boxTypeId: best.bt.id,
+            boxCount: best.n,
+            assignments: best.assignments,
+        });
+        renderGroups();
+        document.getElementById('resultsSection').style.display = 'block';
+        return;
+    }
+
+    // 验证选出最优硬包装方案
+    const bestHard = _validateAndPickBest(hardCandidates, skus);
+
+    // Phase 2: 软包装填充尝试
+    const mainAssignments = [...bestHard.assignments];
+    const mainN = bestHard.n;
+    const mainBt = bestHard.bt;
+    const stillRemainingSoft = [];
+
+    // 软包装按压缩后体积从小到大排序（小件更容易填入缝隙）
+    const sortedSoft = [...softSkus].sort((a, b) => {
+        const va = dimsVolume(getEffectiveDimensions(a));
+        const vb = dimsVolume(getEffectiveDimensions(b));
+        return va - vb;
+    });
+
+    for (const soft of sortedSoft) {
+        let found = false;
+        for (let qtyPerBox = 1; qtyPerBox <= 3; qtyPerBox++) {
+            const testAssignments = [...mainAssignments, { skuId: soft.id, qtyPerBox }];
+            const testGroup = {
+                id: 'test', name: 'test',
+                boxTypeId: mainBt.id, boxCount: mainN,
+                assignments: testAssignments,
+            };
+            // 先检查能否放得进去
+            const effDims = getEffectiveDimensions(soft);
+            if (!canFitInBox(effDims, mainBt.internal)) continue;
+            const validation = validateMixedGroup(testGroup, skus, mainBt.internal);
+            if (!validation.impossible) {
+                mainAssignments.push({ skuId: soft.id, qtyPerBox });
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            stillRemainingSoft.push(soft);
         }
     }
 
-    if (!bestSoln) {
-        // 所有候选方案均未通过验证，取评分最高的作为建议（至少让用户看到尝试）
-        bestSoln = candidates[0];
+    // Phase 3: 剩余软包装第二组
+    let leftoverGroup = null;
+    if (stillRemainingSoft.length > 0) {
+        const softCandidates = _generateCandidates(stillRemainingSoft, boxTypes, skus, 0.90);
+        if (softCandidates.length > 0) {
+            const bestSoft = _validateAndPickBest(softCandidates, skus);
+            if (bestSoft) {
+                leftoverGroup = {
+                    id: genGroupId(),
+                    name: `自动混装-软包装 (${bestSoft.bt.name}, ${bestSoft.n}箱, 利用率${(bestSoft.volUtil*100).toFixed(0)}%)`,
+                    boxTypeId: bestSoft.bt.id,
+                    boxCount: bestSoft.n,
+                    assignments: bestSoft.assignments,
+                };
+            }
+        }
     }
 
+    // Phase 4: 计算主组利用率
+    const mainVolPerBox = mainAssignments.reduce((sum, a) => {
+        const sku = skus.find(s => s.id === a.skuId);
+        return sum + (sku ? a.qtyPerBox * dimsVolume(getEffectiveDimensions(sku)) : 0);
+    }, 0);
+    const mainVolUtil = mainVolPerBox / dimsVolume(mainBt.internal);
+
+    // 创建主组
+    let mainGroupName = `自动混装 (${mainBt.name}, ${mainN}箱, 利用率${(mainVolUtil*100).toFixed(0)}%)`;
+    if (stillRemainingSoft.length > 0) {
+        mainGroupName += `, 软包` + (stillRemainingSoft.length) + `种未填入`;
+    }
     mixedGroups.push({
         id: genGroupId(),
-        name: `自动混装 (${bestSoln.bt.name}, ${bestSoln.n}箱, 利用率${(bestSoln.volUtil*100).toFixed(0)}%)`,
-        boxTypeId: bestSoln.bt.id,
-        boxCount: bestSoln.n,
-        assignments: bestSoln.assignments,
+        name: mainGroupName,
+        boxTypeId: mainBt.id,
+        boxCount: mainN,
+        assignments: mainAssignments,
     });
+
+    // 如果有剩余软包装第二组
+    if (leftoverGroup) {
+        mixedGroups.push(leftoverGroup);
+    }
 
     renderGroups();
     document.getElementById('resultsSection').style.display = 'block';
