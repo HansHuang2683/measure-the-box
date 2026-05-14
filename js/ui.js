@@ -16,6 +16,7 @@ let _lastViewerContext = null; // { groupId, boxIdx }
 
 // ---- 补货推荐状态 ----
 let _lastReplenishmentPlan = null;
+let _lastBoxReplenishmentAlternatives = [];
 let _manualReplenishmentCandidates = [];
 let _nextManualReplenishmentId = 1;
 
@@ -216,6 +217,7 @@ function recalcReplenishment() {
     const candidates = _mergeReplenishmentCandidates(autoCandidates, manualCandidates);
     if (candidates.length === 0) {
         _lastReplenishmentPlan = null;
+        _lastBoxReplenishmentAlternatives = [];
         renderReplenishmentPanel({
             groupId: ctx.group.id,
             boxTypeId: ctx.boxType.id,
@@ -233,6 +235,9 @@ function recalcReplenishment() {
 
     try {
         _lastReplenishmentPlan = generateReplenishmentPlan(ctx.group, ctx.boxType, skus, candidates);
+        _lastBoxReplenishmentAlternatives = typeof generateBoxReplenishmentAlternatives === 'function'
+            ? generateBoxReplenishmentAlternatives(ctx.group, ctx.boxType, skus, candidates)
+            : [];
         renderReplenishmentPanel(_lastReplenishmentPlan);
     } catch (e) {
         console.error('补货推荐计算异常:', e);
@@ -455,7 +460,51 @@ function _renderReplenishmentResult(plan) {
             plan.unusableReasons.map(r => '<span>' + _escapeReplenishmentHtml(r) + '</span>').join('') +
             '</div>';
     }
+    html += _renderBoxReplenishmentAlternatives(_lastBoxReplenishmentAlternatives, plan);
     return html;
+}
+
+function _renderBoxReplenishmentAlternatives(alternatives, currentPlan) {
+    if (!alternatives || alternatives.length === 0) return '';
+    const currentBoxId = currentPlan ? currentPlan.boxTypeId : '';
+    return `
+        <div class="replenishment-box-alt">
+            <div class="replenishment-subtitle">5cm 倍数箱型遍历</div>
+            <div class="replenishment-alt-note">箱型不自动替换当前方案，只用于判断购买哪种常规箱，以及每箱还需要补多少小彩盒。软包按大胆压缩估算。</div>
+            <div class="replenishment-table-wrap">
+                <table class="replenishment-result-table">
+                    <thead>
+                        <tr><th>候选箱型</th><th>当前利用率</th><th>补货后</th><th>每箱补货</th><th>建议补货结构</th><th>箱体变化</th></tr>
+                    </thead>
+                    <tbody>
+                        ${alternatives.map(alt => {
+                            const b = alt.boxType;
+                            const p = alt.plan;
+                            const addText = p.additions && p.additions.length > 0
+                                ? p.additions.map(a => `${a.name}×${a.qtyPerBox}/箱`).join('；')
+                                : '无需/无法补货';
+                            const change = alt.volumeDelta < -0.01
+                                ? `箱体约小 ${Math.abs(alt.volumeDelta * 100).toFixed(0)}%`
+                                : alt.volumeDelta > 0.01
+                                    ? `箱体约大 ${(alt.volumeDelta * 100).toFixed(0)}%`
+                                    : '接近当前箱';
+                            const currentMark = b.id === currentBoxId ? '（当前）' : '';
+                            return `
+                                <tr>
+                                    <td><strong>${formatDims(b.external)}</strong> cm${currentMark}</td>
+                                    <td>${_formatPercent(p.currentUtilization)}</td>
+                                    <td><strong>${_formatPercent(p.projectedUtilization)}</strong></td>
+                                    <td>${alt.addedQtyPerBox} 件/箱</td>
+                                    <td>${_escapeReplenishmentHtml(addText)}</td>
+                                    <td>${change}</td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    `;
 }
 
 function _formatPercent(v) {
@@ -1275,6 +1324,7 @@ function refreshViewer() {
 
 function _resetReplenishmentPanelForViewer() {
     _lastReplenishmentPlan = null;
+    _lastBoxReplenishmentAlternatives = [];
     if (typeof window.clearReplenishmentOverlay === 'function') window.clearReplenishmentOverlay();
     const panel = document.getElementById('replenishmentPanel');
     if (panel && panel.style.display !== 'none' && panel.innerHTML.trim()) {

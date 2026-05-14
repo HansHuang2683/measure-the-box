@@ -10,6 +10,11 @@ const REPLENISHMENT_CONFIG = {
     smallHardBoxVolumeRatio: 0.08,
     hardSupportRatio: 0.85,
     softSupportRatio: 0.5,
+    aggressiveSoftSideScale: 0.82,
+    boxSizeStep: 5,
+    minBoxSide: 30,
+    boxAlternativeLimit: 8,
+    targetUtilization: 0.98,
 };
 
 function buildReplenishmentCandidates(skus, mixedGroups, group, boxType, options) {
@@ -76,10 +81,13 @@ function generateReplenishmentPlan(group, boxType, skus, candidates, options) {
 
     let cavities = _replBuildCavities(basePlaced, boxOrient);
     const cavitiesBefore = cavities.map(_replCloneCavity);
+    const targetUtilization = options.targetUtilization || REPLENISHMENT_CONFIG.targetUtilization;
     const simulation = simulateReplenishmentPlacements(basePlaced, candidates, cavities, boxOrient, {
         boxCount: group.boxCount,
         maxTotalItemsPerBox: options.maxTotalItemsPerBox || REPLENISHMENT_CONFIG.maxTotalItemsPerBox,
         maxPerSkuPerBox: options.maxPerSkuPerBox || REPLENISHMENT_CONFIG.maxPerSkuPerBox,
+        aggressiveSoftPacking: options.aggressiveSoftPacking !== false,
+        maxAddedVolume: Math.max(0, boxVol * targetUtilization - baseProductVolume),
     });
 
     const additions = _replSummarizeAdditions(simulation.placements, candidates, group.boxCount || 1, boxVol);
@@ -101,7 +109,67 @@ function generateReplenishmentPlan(group, boxType, skus, candidates, options) {
         overlayPlacements: simulation.placements,
         boxOrientation: boxOrient,
         baseResult,
+        aggressiveSoftPacking: options.aggressiveSoftPacking !== false,
+        targetUtilization,
     };
+}
+
+function generateBoxReplenishmentAlternatives(group, currentBoxType, skus, candidates, options) {
+    options = options || {};
+    const wall = currentBoxType.wallThickness || CONFIG.defaultWallThickness;
+    const externalSizes = _replGenerate5cmBoxSizes(currentBoxType.external, options);
+    const alternatives = [];
+
+    for (const external of externalSizes) {
+        const internal = dims(
+            Math.max(0.1, external.length - wall * 2),
+            Math.max(0.1, external.width - wall * 2),
+            Math.max(0.1, external.height - wall * 2)
+        );
+        const tempBox = {
+            id: 'box_alt_' + external.length + '_' + external.width + '_' + external.height,
+            name: external.length + '×' + external.width + '×' + external.height,
+            external,
+            internal,
+            wallThickness: wall,
+        };
+
+        let baseResult;
+        try {
+            baseResult = typeof generateMixedLayoutCavity === 'function'
+                ? generateMixedLayoutCavity(group, skus, internal)
+                : generateMixedLayout(group, skus, internal);
+        } catch (e) {
+            continue;
+        }
+        if (!baseResult || baseResult.impossible || !baseResult.layers || baseResult.layers.length === 0) continue;
+
+        const plan = generateReplenishmentPlan(group, tempBox, skus, candidates, {
+            ...options,
+            baseResult,
+            aggressiveSoftPacking: options.aggressiveSoftPacking !== false,
+        });
+        const addedQty = (plan.additions || []).reduce((s, a) => s + a.qtyPerBox, 0);
+        const externalVol = dimsVolume(external);
+        const currentExternalVol = currentBoxType.external ? dimsVolume(currentBoxType.external) : Infinity;
+        const remainingRatio = Math.max(0, 1 - plan.projectedUtilization);
+
+        alternatives.push({
+            boxType: tempBox,
+            plan,
+            addedQtyPerBox: addedQty,
+            externalVolume: externalVol,
+            volumeDelta: Number.isFinite(currentExternalVol) ? externalVol / currentExternalVol - 1 : 0,
+            score: plan.projectedUtilization * 1000 + (1 - remainingRatio) * 100 - (externalVol / 100000),
+        });
+    }
+
+    alternatives.sort((a, b) =>
+        b.plan.projectedUtilization - a.plan.projectedUtilization ||
+        a.externalVolume - b.externalVolume ||
+        b.addedQtyPerBox - a.addedQtyPerBox
+    );
+    return alternatives.slice(0, options.limit || REPLENISHMENT_CONFIG.boxAlternativeLimit);
 }
 
 function simulateReplenishmentPlacements(basePlaced, candidates, cavities, boxInternal, options) {
@@ -112,8 +180,10 @@ function simulateReplenishmentPlacements(basePlaced, candidates, cavities, boxIn
     const perSkuCounts = {};
     const maxTotal = options.maxTotalItemsPerBox || REPLENISHMENT_CONFIG.maxTotalItemsPerBox;
     const boxCount = options.boxCount || 1;
+    const maxAddedVolume = options.maxAddedVolume == null ? Infinity : options.maxAddedVolume;
+    let addedVolume = 0;
 
-    const normalized = (candidates || []).map(c => _replNormalizeCandidate(c, boxCount))
+    const normalized = (candidates || []).map(c => _replNormalizeCandidate(c, boxCount, options))
         .filter(c => c.maxPerBox > 0 && c.dims.length > 0 && c.dims.width > 0 && c.dims.height > 0);
 
     for (let step = 0; step < maxTotal; step++) {
@@ -125,6 +195,8 @@ function simulateReplenishmentPlacements(basePlaced, candidates, cavities, boxIn
 
             const fits = enumerateCandidateFits(candidate, currentCavities, placedItems, boxInternal);
             for (const fit of fits) {
+                const fitVol = fit.orientation.l * fit.orientation.w * fit.orientation.h;
+                if (addedVolume + fitVol > maxAddedVolume + 0.01) continue;
                 if (!best || fit.score > best.score) best = fit;
             }
         }
@@ -148,6 +220,7 @@ function simulateReplenishmentPlacements(basePlaced, candidates, cavities, boxIn
             supportRatio: best.supportRatio,
         };
         placements.push(p);
+        addedVolume += p.length * p.width * p.height;
         perSkuCounts[best.candidate.id] = (perSkuCounts[best.candidate.id] || 0) + 1;
 
         placedItems.push({
@@ -279,9 +352,10 @@ function _replCavitySort(a, b) {
     return a.z - b.z || (b.l * b.w * b.h) - (a.l * a.w * a.h);
 }
 
-function _replNormalizeCandidate(candidate, boxCount) {
+function _replNormalizeCandidate(candidate, boxCount, options) {
+    options = options || {};
     const dimsEff = candidate.packagingType === 'soft'
-        ? _replSoftEffectiveDims(candidate)
+        ? _replSoftEffectiveDims(candidate, options.aggressiveSoftPacking !== false)
         : dimsClone(candidate.dimensions);
     return {
         ...candidate,
@@ -290,8 +364,15 @@ function _replNormalizeCandidate(candidate, boxCount) {
     };
 }
 
-function _replSoftEffectiveDims(candidate) {
+function _replSoftEffectiveDims(candidate, aggressive) {
     const d = candidate.dimensions;
+    if (aggressive) {
+        return dims(
+            Math.max(0.1, d.length * REPLENISHMENT_CONFIG.aggressiveSoftSideScale),
+            Math.max(0.1, d.width * REPLENISHMENT_CONFIG.aggressiveSoftSideScale),
+            Math.max(0.1, d.height * REPLENISHMENT_CONFIG.aggressiveSoftSideScale)
+        );
+    }
     if (candidate.softTolerance && candidate.softTolerance > 0) {
         const scale = Math.pow(1 - candidate.softTolerance, 1 / 3);
         return dims(d.length * scale, d.width * scale, d.height * scale);
@@ -384,11 +465,35 @@ function _replSummarizeAdditions(placements, candidates, boxCount, boxVol) {
 function _replMinCandidateSide(candidates) {
     let minSide = Infinity;
     for (const c of candidates || []) {
-        const d = c.packagingType === 'soft' ? _replSoftEffectiveDims(c) : c.dimensions;
+        const d = c.packagingType === 'soft' ? _replSoftEffectiveDims(c, true) : c.dimensions;
         if (!d) continue;
         minSide = Math.min(minSide, d.length, d.width, d.height);
     }
     return Number.isFinite(minSide) ? minSide : 0.5;
+}
+
+function _replGenerate5cmBoxSizes(currentExternal, options) {
+    options = options || {};
+    const step = options.step || REPLENISHMENT_CONFIG.boxSizeStep;
+    const minSide = options.minSide || REPLENISHMENT_CONFIG.minBoxSide;
+    const maxSide = options.maxSide || CONFIG.maxSide;
+    const sizes = [];
+    for (let l = minSide; l <= maxSide; l += step) {
+        for (let w = minSide; w <= maxSide; w += step) {
+            for (let h = minSide; h <= maxSide; h += step) {
+                const sorted = [l, w, h].sort((a, b) => b - a);
+                const key = sorted.join('x');
+                if (sizes.some(s => s.key === key)) continue;
+                sizes.push({ key, dims: dims(sorted[0], sorted[1], sorted[2]) });
+            }
+        }
+    }
+    if (currentExternal) {
+        const sorted = [currentExternal.length, currentExternal.width, currentExternal.height].sort((a, b) => b - a);
+        const key = sorted.join('x');
+        if (!sizes.some(s => s.key === key)) sizes.push({ key, dims: dims(sorted[0], sorted[1], sorted[2]) });
+    }
+    return sizes.map(s => s.dims);
 }
 
 function _replCloneCavity(c) {
@@ -401,6 +506,7 @@ function _replClonePlaced(p) {
 
 window.buildReplenishmentCandidates = buildReplenishmentCandidates;
 window.generateReplenishmentPlan = generateReplenishmentPlan;
+window.generateBoxReplenishmentAlternatives = generateBoxReplenishmentAlternatives;
 window.enumerateCandidateFits = enumerateCandidateFits;
 window.scoreReplenishmentFit = scoreReplenishmentFit;
 window.simulateReplenishmentPlacements = simulateReplenishmentPlacements;

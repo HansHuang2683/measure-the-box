@@ -613,6 +613,20 @@ td input:focus, td select:focus {
 .replenishment-notes strong {
     color: #334155;
 }
+.replenishment-box-alt {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid #E2E8F0;
+}
+.replenishment-alt-note {
+    font-size: 12px;
+    color: #64748B;
+    background: #F8FAFC;
+    border: 1px solid #E2E8F0;
+    border-radius: 6px;
+    padding: 7px 9px;
+    margin-bottom: 8px;
+}
 
 @media (max-width: 720px) {
     .replenishment-header { flex-direction: column; }
