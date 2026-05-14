@@ -1476,15 +1476,13 @@ function _validateAndPickBest(candidates, allSkus) {
     if (candidates.length === 0) return null;
     candidates.sort((a, b) => b.score - a.score);
     for (const cand of candidates) {
-        const tempGroup = {
-            id: 'temp', name: 'temp',
-            boxTypeId: cand.bt.id, boxCount: cand.n,
-            assignments: cand.assignments,
-        };
-        const validation = validateMixedGroup(tempGroup, allSkus, cand.bt.internal);
-        if (!validation.impossible) return cand;
+        const layout = _validateAutoCandidate(cand, allSkus);
+        if (layout) {
+            cand.layout = layout;
+            return cand;
+        }
     }
-    return candidates[0]; // fallback
+    return null;
 }
 
 function _validateAutoCandidate(cand, allSkus) {
@@ -1497,14 +1495,30 @@ function _validateAutoCandidate(cand, allSkus) {
         assignments: cand.assignments,
     };
     try {
-        const layout = typeof generateMixedLayoutCavity === 'function'
-            ? generateMixedLayoutCavity(tempGroup, allSkus, cand.bt.internal)
-            : generateMixedLayout(tempGroup, allSkus, cand.bt.internal);
-        if (!layout || layout.impossible) return null;
+        // Auto allocation must match the default 3D preview: no estimated/partial layout.
+        const layout = generateMixedLayout(tempGroup, allSkus, cand.bt.internal);
+        if (!_isAutoLayoutComplete(layout, cand.assignments)) return null;
         return layout;
     } catch (e) {
         return null;
     }
+}
+
+function _isAutoLayoutComplete(layout, assignments) {
+    if (!layout || layout.impossible || !layout.verifiedFit) return false;
+    if (layout.overflowItems && layout.overflowItems.length > 0) return false;
+    const expected = (assignments || []).reduce((s, a) => s + (a.qtyPerBox || 0), 0);
+    const placed = _countLayoutPlacedItems(layout);
+    return placed >= expected;
+}
+
+function _countLayoutPlacedItems(layout) {
+    let count = 0;
+    for (const layer of layout.layers || []) {
+        count += (layer.placements || []).length;
+        count += (layer.stacks || []).length;
+    }
+    return count;
 }
 
 function _getAutoBoxPool() {
@@ -1787,6 +1801,10 @@ function autoCreateGroups() {
             return;
         }
         const best = _validateAndPickBest(candidates, skus);
+        if (!best) {
+            alert('无法找到可完整装入箱内的自动装箱方案，请尝试更大箱型或减少每箱数量');
+            return;
+        }
         best.bt = _ensureAutoBoxType(best.bt);
         mixedGroups.push({
             id: genGroupId(),
@@ -1817,6 +1835,10 @@ function autoCreateGroups() {
             return;
         }
         const best = _validateAndPickBest(fallbackCandidates, skus);
+        if (!best) {
+            alert('无法找到可完整装入箱内的自动装箱方案，请尝试更大箱型或减少每箱数量');
+            return;
+        }
         best.bt = _ensureAutoBoxType(best.bt);
         mixedGroups.push({
             id: genGroupId(),
