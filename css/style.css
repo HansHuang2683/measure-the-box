@@ -627,6 +627,9 @@ td input:focus, td select:focus {
     padding: 7px 9px;
     margin-bottom: 8px;
 }
+.replenishment-preview-btn {
+    white-space: nowrap;
+}
 
 @media (max-width: 720px) {
     .replenishment-header { flex-direction: column; }

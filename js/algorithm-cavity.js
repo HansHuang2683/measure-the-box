@@ -239,6 +239,7 @@ function calcContactArea(x, y, z, l, w, h, placedItems) {
  * @returns {Array} [{l, w, h}] 所有可放入的朝向
  */
 function enumerateFitOrientations(dims, maxL, maxW, maxH) {
+    const eps = 1e-6;
     const a = dims.length, b = dims.width, c = dims.height;
     const allOrientations = [
         { l: a, w: b, h: c },
@@ -248,7 +249,7 @@ function enumerateFitOrientations(dims, maxL, maxW, maxH) {
         { l: c, w: a, h: b },
         { l: c, w: b, h: a },
     ];
-    return allOrientations.filter(o => o.l <= maxL && o.w <= maxW && o.h <= maxH);
+    return allOrientations.filter(o => o.l <= maxL + eps && o.w <= maxW + eps && o.h <= maxH + eps);
 }
 
 // ===== Phase 2: 空腔填充 =====

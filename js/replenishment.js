@@ -142,7 +142,14 @@ function generateBoxReplenishmentAlternatives(group, currentBoxType, skus, candi
         } catch (e) {
             continue;
         }
-        if (!baseResult || baseResult.impossible || !baseResult.layers || baseResult.layers.length === 0) continue;
+        if (!baseResult ||
+            baseResult.impossible ||
+            !baseResult.verifiedFit ||
+            (baseResult.overflowItems && baseResult.overflowItems.length > 0) ||
+            !baseResult.layers ||
+            baseResult.layers.length === 0) {
+            continue;
+        }
 
         const plan = generateReplenishmentPlan(group, tempBox, skus, candidates, {
             ...options,
@@ -300,7 +307,12 @@ function summarizeUnusableCavities(cavities, candidates) {
     const narrow = usable.filter(c => Math.min(c.l, c.w, c.h) < minCandidateSide);
     if (narrow.length > 0) reasons.push(narrow.length + ' 个空腔存在窄边，小于候选产品最小边');
     const top = usable.filter(c => c.z > 0.01);
-    if (top.length > 0) reasons.push(top.length + ' 个上层空腔需要支撑，硬包装不建议放入');
+    if (top.length > 0) {
+        const hasSoftCandidate = (candidates || []).some(c => c.packagingType === 'soft');
+        reasons.push(hasSoftCandidate
+            ? top.length + ' 个上层/平台空腔仍未匹配到合适候选（多为窄条、碎片或支撑不足）'
+            : top.length + ' 个上层空腔需要支撑，硬包装不建议放入');
+    }
     const totalVol = usable.reduce((s, c) => s + c.l * c.w * c.h, 0);
     if (totalVol > 0) reasons.push('剩余碎片空腔总体积约 ' + totalVol.toFixed(0) + ' cm³');
     return reasons;

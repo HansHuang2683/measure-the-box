@@ -474,10 +474,10 @@ function _renderBoxReplenishmentAlternatives(alternatives, currentPlan) {
             <div class="replenishment-table-wrap">
                 <table class="replenishment-result-table">
                     <thead>
-                        <tr><th>候选箱型</th><th>当前利用率</th><th>补货后</th><th>每箱补货</th><th>建议补货结构</th><th>箱体变化</th></tr>
+                        <tr><th>候选箱型</th><th>当前利用率</th><th>补货后</th><th>每箱补货</th><th>建议补货结构</th><th>箱体变化</th><th>操作</th></tr>
                     </thead>
                     <tbody>
-                        ${alternatives.map(alt => {
+                        ${alternatives.map((alt, idx) => {
                             const b = alt.boxType;
                             const p = alt.plan;
                             const addText = p.additions && p.additions.length > 0
@@ -497,6 +497,7 @@ function _renderBoxReplenishmentAlternatives(alternatives, currentPlan) {
                                     <td>${alt.addedQtyPerBox} 件/箱</td>
                                     <td>${_escapeReplenishmentHtml(addText)}</td>
                                     <td>${change}</td>
+                                    <td><button class="btn btn-sm btn-outline replenishment-preview-btn" onclick="previewBoxReplenishmentAlternative(${idx})">3D 预览</button></td>
                                 </tr>
                             `;
                         }).join('')}
@@ -505,6 +506,40 @@ function _renderBoxReplenishmentAlternatives(alternatives, currentPlan) {
             </div>
         </div>
     `;
+}
+
+function previewBoxReplenishmentAlternative(index) {
+    const alt = _lastBoxReplenishmentAlternatives[index];
+    if (!alt || !alt.boxType || !alt.plan) {
+        alert('该候选箱型暂无可预览的 3D 方案');
+        return;
+    }
+    const ctx = getCurrentViewerGroupAndBox();
+    if (!ctx) {
+        alert('请先选择一个箱子预览');
+        return;
+    }
+    try {
+        if (typeof exitSandboxMode === 'function') exitSandboxMode();
+        const result = alt.plan.baseResult || (
+            typeof generateMixedLayoutCavity === 'function'
+                ? generateMixedLayoutCavity(ctx.group, skus, alt.boxType.internal)
+                : generateMixedLayout(ctx.group, skus, alt.boxType.internal)
+        );
+        if (!result || (result.impossible && (!result.layers || result.layers.length === 0))) {
+            alert('该候选箱型无法生成完整 3D 预览');
+            return;
+        }
+        loadGroupIntoViewer(ctx.group, alt.boxType, result, 0, result.cavities);
+        if (typeof window.renderReplenishmentOverlay === 'function' && alt.plan.overlayPlacements && alt.plan.overlayPlacements.length > 0) {
+            window.renderReplenishmentOverlay(alt.plan.overlayPlacements, alt.plan.boxOrientation || alt.boxType.internal);
+        }
+        const viewer = document.getElementById('viewer-container');
+        if (viewer) viewer.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch (e) {
+        console.error('候选箱型 3D 预览失败:', e);
+        alert('候选箱型 3D 预览失败：' + e.message);
+    }
 }
 
 function _formatPercent(v) {
