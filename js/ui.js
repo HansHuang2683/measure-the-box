@@ -1438,146 +1438,6 @@ function _validateAndPickBest(candidates, allSkus) {
 }
 
 /**
- * 基于已验证布局的真实占用尺寸，反推更贴合的定制箱。
- * 目的：避免选到“能装但过高/过大”的标准箱。
- */
-function _optimizeCandidateBoxByLayout(cand, allSkus) {
-    if (!cand || !cand.bt || !cand.assignments || cand.assignments.length === 0) return cand;
-
-    const tempGroup = {
-        id: 'tighten', name: 'tighten',
-        boxTypeId: cand.bt.id,
-        boxCount: cand.n,
-        assignments: cand.assignments,
-    };
-
-    let layout;
-    try {
-        layout = generateMixedLayout(tempGroup, allSkus, cand.bt.internal);
-    } catch (e) {
-        return cand;
-    }
-    if (!layout || !layout.layers || layout.layers.length === 0 || layout.impossible) return cand;
-
-    const used = _calcLayoutUsedDims(layout.layers);
-    if (!used || used.length <= 0 || used.width <= 0 || used.height <= 0) return cand;
-
-    const wall = cand.bt.wallThickness || CONFIG.defaultWallThickness;
-    const safety = CONFIG.defaultGap || 0.5;
-    const internal = dims(
-        _roundUp1(used.length + safety),
-        _roundUp1(used.width + safety),
-        _roundUp1(used.height + safety)
-    );
-    const external = dims(
-        _roundUp1(internal.length + wall * 2),
-        _roundUp1(internal.width + wall * 2),
-        _roundUp1(internal.height + wall * 2)
-    );
-
-    if (Math.max(external.length, external.width, external.height) > CONFIG.maxSide) return cand;
-
-    const oldExternal = cand.bt.external || dims(
-        cand.bt.internal.length + wall * 2,
-        cand.bt.internal.width + wall * 2,
-        cand.bt.internal.height + wall * 2
-    );
-    const oldVol = dimsVolume(oldExternal);
-    const newVol = dimsVolume(external);
-
-    // 体积至少缩小 6% 才自动替换，避免为了几毫米制造大量定制箱。
-    if (!(newVol < oldVol * 0.94)) return cand;
-
-    const tightBox = _findOrCreateOptimizedBoxType(external, wall, cand.bt.name);
-    const verifyGroup = {
-        id: 'tighten_verify', name: 'tighten_verify',
-        boxTypeId: tightBox.id,
-        boxCount: cand.n,
-        assignments: cand.assignments,
-    };
-    const validation = validateMixedGroup(verifyGroup, allSkus, tightBox.internal);
-    if (validation.impossible) return cand;
-
-    const productVol = cand.assignments.reduce((sum, a) => {
-        const sku = allSkus.find(s => s.id === a.skuId);
-        return sum + (sku ? a.qtyPerBox * dimsVolume(getEffectiveDimensions(sku)) : 0);
-    }, 0);
-
-    return {
-        ...cand,
-        bt: tightBox,
-        volUtil: productVol / dimsVolume(tightBox.internal),
-        optimizedFrom: cand.bt.name,
-        layoutUsed: used,
-    };
-}
-
-function _calcLayoutUsedDims(layers) {
-    let minX = Infinity, maxX = -Infinity;
-    let minY = Infinity, maxY = -Infinity;
-    let minZ = Infinity, maxZ = -Infinity;
-
-    for (const layer of layers || []) {
-        const yOff = layer.yOffset || 0;
-        for (const p of layer.placements || []) {
-            minX = Math.min(minX, p.x);
-            maxX = Math.max(maxX, p.x + (p.length || 0));
-            minY = Math.min(minY, yOff);
-            maxY = Math.max(maxY, yOff + (p.height || layer.height || 0));
-            minZ = Math.min(minZ, p.y);
-            maxZ = Math.max(maxZ, p.y + (p.width || 0));
-        }
-        for (const s of layer.stacks || []) {
-            minX = Math.min(minX, s.x);
-            maxX = Math.max(maxX, s.x + (s.length || 0));
-            minY = Math.min(minY, yOff + (s.stackBase || 0));
-            maxY = Math.max(maxY, yOff + (s.stackBase || 0) + (s.height || 0));
-            minZ = Math.min(minZ, s.z);
-            maxZ = Math.max(maxZ, s.z + (s.width || 0));
-        }
-    }
-
-    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(minZ)) return null;
-    return dims(
-        _roundUp1(Math.max(0, maxX - minX)),
-        _roundUp1(Math.max(0, maxZ - minZ)),
-        _roundUp1(Math.max(0, maxY - minY))
-    );
-}
-
-function _findOrCreateOptimizedBoxType(external, wall, sourceName) {
-    const existing = boxTypes.find(b =>
-        Math.abs(b.external.length - external.length) < 0.05 &&
-        Math.abs(b.external.width - external.width) < 0.05 &&
-        Math.abs(b.external.height - external.height) < 0.05 &&
-        Math.abs((b.wallThickness || CONFIG.defaultWallThickness) - wall) < 0.05
-    );
-    if (existing) return existing;
-
-    const name = `推荐定制 ${formatDims(external)}`;
-    const box = {
-        id: genBoxId(),
-        name,
-        external,
-        wallThickness: wall,
-        internal: dims(
-            Math.max(0.1, external.length - wall * 2),
-            Math.max(0.1, external.width - wall * 2),
-            Math.max(0.1, external.height - wall * 2)
-        ),
-        optimizedFrom: sourceName,
-    };
-    boxTypes.push(box);
-    renderBoxChips();
-    populateStdBoxSelect();
-    return box;
-}
-
-function _roundUp1(v) {
-    return Math.ceil((v || 0) * 10) / 10;
-}
-
-/**
  * 计算所有SKU在分配后的剩余数量总和（封顶）
  */
 function _calcRemainder(assignments, n, allSkus) {
@@ -1674,8 +1534,7 @@ function autoCreateGroups() {
             alert('无法找到合适的装箱方案，请检查产品尺寸是否过大');
             return;
         }
-        let best = _validateAndPickBest(candidates, skus);
-        best = _optimizeCandidateBoxByLayout(best, skus);
+        const best = _validateAndPickBest(candidates, skus);
         mixedGroups.push({
             id: genGroupId(),
             name: `自动混装 (${best.bt.name}, ${best.n}箱, 利用率${(best.volUtil*100).toFixed(0)}%)`,
@@ -1703,8 +1562,7 @@ function autoCreateGroups() {
             alert('无法找到合适的装箱方案，请检查产品尺寸是否过大');
             return;
         }
-        let best = _validateAndPickBest(fallbackCandidates, skus);
-        best = _optimizeCandidateBoxByLayout(best, skus);
+        const best = _validateAndPickBest(fallbackCandidates, skus);
         mixedGroups.push({
             id: genGroupId(),
             name: `自动混装 (${best.bt.name}, ${best.n}箱, 利用率${(best.volUtil*100).toFixed(0)}%)`,
@@ -1762,8 +1620,7 @@ function autoCreateGroups() {
     if (stillRemainingSoft.length > 0) {
         const softCandidates = _generateCandidates(stillRemainingSoft, boxTypes, skus, 0.90);
         if (softCandidates.length > 0) {
-            let bestSoft = _validateAndPickBest(softCandidates, skus);
-            bestSoft = _optimizeCandidateBoxByLayout(bestSoft, skus);
+            const bestSoft = _validateAndPickBest(softCandidates, skus);
             if (bestSoft) {
                 leftoverGroup = {
                     id: genGroupId(),
@@ -1781,26 +1638,17 @@ function autoCreateGroups() {
         const sku = skus.find(s => s.id === a.skuId);
         return sum + (sku ? a.qtyPerBox * dimsVolume(getEffectiveDimensions(sku)) : 0);
     }, 0);
-    let mainCandidate = {
-        bt: mainBt,
-        n: mainN,
-        assignments: mainAssignments,
-        volUtil: mainVolPerBox / dimsVolume(mainBt.internal),
-        score: bestHard.score,
-    };
-    mainCandidate = _optimizeCandidateBoxByLayout(mainCandidate, skus);
-    const finalMainBt = mainCandidate.bt;
-    const mainVolUtil = mainVolPerBox / dimsVolume(finalMainBt.internal);
+    const mainVolUtil = mainVolPerBox / dimsVolume(mainBt.internal);
 
     // 创建主组
-    let mainGroupName = `自动混装 (${finalMainBt.name}, ${mainN}箱, 利用率${(mainVolUtil*100).toFixed(0)}%)`;
+    let mainGroupName = `自动混装 (${mainBt.name}, ${mainN}箱, 利用率${(mainVolUtil*100).toFixed(0)}%)`;
     if (stillRemainingSoft.length > 0) {
         mainGroupName += `, 软包` + (stillRemainingSoft.length) + `种未填入`;
     }
     mixedGroups.push({
         id: genGroupId(),
         name: mainGroupName,
-        boxTypeId: finalMainBt.id,
+        boxTypeId: mainBt.id,
         boxCount: mainN,
         assignments: mainAssignments,
     });
