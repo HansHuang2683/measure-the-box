@@ -93,7 +93,7 @@ function parseAmazonXlsx(buffer) {
 function generateSimpleXlsx(skus, boxTypes, mixedGroups) {
     if (typeof XLSX === 'undefined') {
         // Fallback to CSV
-        let csv = 'SKU,箱子类型,箱号,每箱数量,长(cm),宽(cm),高(cm)\n';
+        let csv = 'SKU,箱子类型,箱号,每箱数量,长(cm),宽(cm),高(cm),单件重量(kg),单箱重量(kg)\n';
 
         for (const group of mixedGroups) {
             const bt = boxTypes.find(b => b.id === group.boxTypeId);
@@ -102,7 +102,8 @@ function generateSimpleXlsx(skus, boxTypes, mixedGroups) {
                 for (const asgn of group.assignments) {
                     const sku = skus.find(s => s.id === asgn.skuId);
                     if (!sku) continue;
-                    csv += `"${sku.name}","${bt ? bt.name : ''}","${boxLabel}",${asgn.qtyPerBox},${sku.dimensions.length},${sku.dimensions.width},${sku.dimensions.height}\n`;
+                    const unitWeight = Number(sku.unitWeight) || 0;
+                    csv += `"${sku.name}","${bt ? bt.name : ''}","${boxLabel}",${asgn.qtyPerBox},${sku.dimensions.length},${sku.dimensions.width},${sku.dimensions.height},${unitWeight},${unitWeight * asgn.qtyPerBox}\n`;
                 }
             }
         }
@@ -134,7 +135,7 @@ function generateSimpleXlsx(skus, boxTypes, mixedGroups) {
 
     // SheetJS 导出
     try {
-        const data = [['混装组', '箱号', '箱型', 'SKU', '每箱数量', '长(cm)', '宽(cm)', '高(cm)']];
+        const data = [['混装组', '箱号', '箱型', 'SKU', '每箱数量', '长(cm)', '宽(cm)', '高(cm)', '单件重量(kg)', '单箱重量(kg)']];
 
         for (const group of mixedGroups) {
             const bt = boxTypes.find(b => b.id === group.boxTypeId);
@@ -151,6 +152,8 @@ function generateSimpleXlsx(skus, boxTypes, mixedGroups) {
                         sku.dimensions.length,
                         sku.dimensions.width,
                         sku.dimensions.height,
+                        Number(sku.unitWeight) || 0,
+                        (Number(sku.unitWeight) || 0) * asgn.qtyPerBox,
                     ]);
                 }
             }
@@ -161,7 +164,7 @@ function generateSimpleXlsx(skus, boxTypes, mixedGroups) {
         XLSX.utils.book_append_sheet(wb, ws, '装箱方案');
 
         // 添加汇总表
-        const summaryData = [['SKU', '总数量', '已装箱', '剩余', '包装类型']];
+        const summaryData = [['SKU', '总数量', '已装箱', '剩余', '包装类型', '单件重量(kg)', '总重量(kg)']];
         for (const sku of skus) {
             let used = 0;
             for (const group of mixedGroups) {
@@ -171,7 +174,9 @@ function generateSimpleXlsx(skus, boxTypes, mixedGroups) {
             summaryData.push([
                 sku.name, sku.quantity, used,
                 Math.max(0, sku.quantity - used),
-                sku.packagingType === 'soft' ? `软(${Math.round(sku.softTolerance * 100)}%)` : '硬'
+                sku.packagingType === 'soft' ? `软(${Math.round(sku.softTolerance * 100)}%)` : '硬',
+                Number(sku.unitWeight) || 0,
+                (Number(sku.unitWeight) || 0) * sku.quantity,
             ]);
         }
         const ws2 = XLSX.utils.aoa_to_sheet(summaryData);

@@ -11,10 +11,13 @@ const REPLENISHMENT_CONFIG = {
     hardSupportRatio: 0.85,
     softSupportRatio: 0.5,
     aggressiveSoftSideScale: 0.82,
+    theoreticalVisualMinSideScale: 0.38,
+    theoreticalOverlapRatio: 0.42,
     boxSizeStep: 5,
     minBoxSide: 30,
     boxAlternativeLimit: 8,
     targetUtilization: 0.98,
+    theoreticalFillCap: 1.0,
 };
 
 function buildReplenishmentCandidates(skus, mixedGroups, group, boxType, options) {
@@ -77,7 +80,8 @@ function generateReplenishmentPlan(group, boxType, skus, candidates, options) {
     const boxOrient = (layers[0] && layers[0].boxOrientation) || boxInternal;
     const boxVol = dimsVolume(boxOrient);
     const basePlaced = _replExtractPlacedItems(layers);
-    const baseProductVolume = baseResult.productVolume || basePlaced.reduce((s, p) => s + p.l * p.w * p.h, 0);
+    const basePhysicalVolume = baseResult.productVolume || _replVolumeFromPlacedItems(basePlaced, false);
+    const baseTheoreticalVolume = _replVolumeFromPlacedItems(basePlaced, true);
 
     let cavities = _replBuildCavities(basePlaced, boxOrient);
     const cavitiesBefore = cavities.map(_replCloneCavity);
@@ -87,52 +91,74 @@ function generateReplenishmentPlan(group, boxType, skus, candidates, options) {
         maxTotalItemsPerBox: options.maxTotalItemsPerBox || REPLENISHMENT_CONFIG.maxTotalItemsPerBox,
         maxPerSkuPerBox: options.maxPerSkuPerBox || REPLENISHMENT_CONFIG.maxPerSkuPerBox,
         aggressiveSoftPacking: options.aggressiveSoftPacking !== false,
-        maxAddedVolume: Math.max(0, boxVol * targetUtilization - baseProductVolume),
+        maxAddedVolume: Math.max(0, boxVol * targetUtilization - basePhysicalVolume),
     });
 
-    const additions = _replSummarizeAdditions(simulation.placements, candidates, group.boxCount || 1, boxVol);
-    const addedVolume = simulation.placements.reduce((s, p) => s + p.length * p.width * p.height, 0);
-    const currentUtilization = boxVol > 0 ? baseProductVolume / boxVol : 0;
-    const projectedUtilization = boxVol > 0 ? (baseProductVolume + addedVolume) / boxVol : currentUtilization;
+    const physicalAdditions = _replSummarizeAdditions(simulation.placements, candidates, group.boxCount || 1, boxVol);
+    const physicalAddedVolume = simulation.placements.reduce((s, p) => s + p.length * p.width * p.height, 0);
+    const currentPhysicalUtilization = boxVol > 0 ? basePhysicalVolume / boxVol : 0;
+    const projectedPhysicalUtilization = boxVol > 0 ? (basePhysicalVolume + physicalAddedVolume) / boxVol : currentPhysicalUtilization;
+
+    const theoreticalPlan = _replBuildTheoreticalSoftPlan({
+        group,
+        candidates,
+        boxOrient,
+        boxVol,
+        boxCount: group.boxCount || 1,
+        basePlaced,
+        cavitiesBefore,
+        basePhysicalVolume,
+        baseTheoreticalVolume,
+        options,
+    });
+    const currentTheoreticalUtilization = boxVol > 0 ? baseTheoreticalVolume / boxVol : 0;
+    const projectedTheoreticalUtilization = boxVol > 0
+        ? (baseTheoreticalVolume + theoreticalPlan.addedOriginalVolume) / boxVol
+        : currentTheoreticalUtilization;
 
     return {
         groupId: group.id,
         boxTypeId: boxType.id,
         boxCount: group.boxCount || 1,
-        currentUtilization,
-        projectedUtilization,
-        addedVolume,
-        additions,
+        fitMode: 'dual',
+        currentPhysicalUtilization,
+        projectedPhysicalUtilization,
+        currentTheoreticalUtilization,
+        projectedTheoreticalUtilization,
+        currentUtilization: currentPhysicalUtilization,
+        projectedUtilization: projectedPhysicalUtilization,
+        physicalAddedVolume,
+        theoreticalAddedVolume: theoreticalPlan.addedPhysicalVolume,
+        theoreticalOriginalAddedVolume: theoreticalPlan.addedOriginalVolume,
+        additions: physicalAdditions,
+        physicalAdditions,
+        theoreticalAdditions: theoreticalPlan.additions,
         cavitiesBefore,
         cavitiesAfter: simulation.cavities.map(_replCloneCavity),
         unusableReasons: summarizeUnusableCavities(simulation.cavities, candidates),
         overlayPlacements: simulation.placements,
+        physicalPlacements: simulation.placements,
+        realPlacements: basePlaced,
+        compressedPlacements: theoreticalPlan.compressedPlacements,
         boxOrientation: boxOrient,
         baseResult,
         aggressiveSoftPacking: options.aggressiveSoftPacking !== false,
         targetUtilization,
+        theoreticalTargetUtilization: REPLENISHMENT_CONFIG.theoreticalFillCap,
+        theoreticalModeNote: theoreticalPlan.additions.length > 0
+            ? '软包理论压缩按原始体积估算，利用率可超过100%'
+            : '当前候选中没有可用于理论压缩的软包',
     };
 }
 
 function generateBoxReplenishmentAlternatives(group, currentBoxType, skus, candidates, options) {
     options = options || {};
-    const wall = currentBoxType.wallThickness || CONFIG.defaultWallThickness;
-    const externalSizes = _replGenerate5cmBoxSizes(currentBoxType.external, options);
+    const boxCandidates = _replGetListedBoxCandidates(currentBoxType, options);
     const alternatives = [];
 
-    for (const external of externalSizes) {
-        const internal = dims(
-            Math.max(0.1, external.length - wall * 2),
-            Math.max(0.1, external.width - wall * 2),
-            Math.max(0.1, external.height - wall * 2)
-        );
-        const tempBox = {
-            id: 'box_alt_' + external.length + '_' + external.width + '_' + external.height,
-            name: external.length + '×' + external.width + '×' + external.height,
-            external,
-            internal,
-            wallThickness: wall,
-        };
+    for (const tempBox of boxCandidates) {
+        const external = tempBox.external;
+        const internal = tempBox.internal;
 
         let baseResult;
         try {
@@ -156,23 +182,29 @@ function generateBoxReplenishmentAlternatives(group, currentBoxType, skus, candi
             baseResult,
             aggressiveSoftPacking: options.aggressiveSoftPacking !== false,
         });
-        const addedQty = (plan.additions || []).reduce((s, a) => s + a.qtyPerBox, 0);
+        const physicalAddedQty = (plan.physicalAdditions || []).reduce((s, a) => s + a.qtyPerBox, 0);
+        const theoreticalAddedQty = (plan.theoreticalAdditions || []).reduce((s, a) => s + a.qtyPerBox, 0);
         const externalVol = dimsVolume(external);
         const currentExternalVol = currentBoxType.external ? dimsVolume(currentBoxType.external) : Infinity;
-        const remainingRatio = Math.max(0, 1 - plan.projectedUtilization);
 
         alternatives.push({
             boxType: tempBox,
             plan,
-            addedQtyPerBox: addedQty,
+            physicalAddedQtyPerBox: physicalAddedQty,
+            theoreticalAddedQtyPerBox: theoreticalAddedQty,
+            addedQtyPerBox: theoreticalAddedQty || physicalAddedQty,
             externalVolume: externalVol,
             volumeDelta: Number.isFinite(currentExternalVol) ? externalVol / currentExternalVol - 1 : 0,
-            score: plan.projectedUtilization * 1000 + (1 - remainingRatio) * 100 - (externalVol / 100000),
+            score: plan.projectedTheoreticalUtilization * 1000 +
+                plan.projectedPhysicalUtilization * 100 +
+                (theoreticalAddedQty || physicalAddedQty) * 8 -
+                (externalVol / 100000),
         });
     }
 
     alternatives.sort((a, b) =>
-        b.plan.projectedUtilization - a.plan.projectedUtilization ||
+        b.plan.projectedTheoreticalUtilization - a.plan.projectedTheoreticalUtilization ||
+        b.plan.projectedPhysicalUtilization - a.plan.projectedPhysicalUtilization ||
         a.externalVolume - b.externalVolume ||
         b.addedQtyPerBox - a.addedQtyPerBox
     );
@@ -318,6 +350,290 @@ function summarizeUnusableCavities(cavities, candidates) {
     return reasons;
 }
 
+function _replBuildTheoreticalSoftPlan(ctx) {
+    const {
+        candidates,
+        boxOrient,
+        boxVol,
+        boxCount,
+        cavitiesBefore,
+        basePhysicalVolume,
+        baseTheoreticalVolume,
+        options,
+    } = ctx;
+
+    const softCandidates = (candidates || [])
+        .filter(c => c && c.packagingType === 'soft')
+        .map(c => {
+            const dimsEff = _replSoftEffectiveDims(c, options.theoreticalAggressiveSoftPacking !== false);
+            const physicalVolume = dimsVolume(dimsEff);
+            const originalVolume = dimsVolume(c.dimensions || dimsEff);
+            const ratio = physicalVolume > 0 ? originalVolume / physicalVolume : 0;
+            const maxPerBox = Math.max(0, Math.floor((c.maxQty || 0) / Math.max(1, boxCount || 1)));
+            return {
+                ...c,
+                dims: dimsEff,
+                physicalVolume,
+                originalVolume,
+                ratio,
+                maxPerBox,
+            };
+        })
+        .filter(c => c.maxPerBox > 0 && c.dims.length > 0 && c.dims.width > 0 && c.dims.height > 0);
+
+    const cavityCapacity = (cavitiesBefore || [])
+        .filter(_replCavityUsable)
+        .reduce((sum, c) => sum + c.l * c.w * c.h, 0);
+    const geometricCapacity = Math.max(0, boxVol * (options.theoreticalFillCap || REPLENISHMENT_CONFIG.theoreticalFillCap) - basePhysicalVolume);
+    const remainingCapacity = Math.max(0, Math.max(cavityCapacity, geometricCapacity));
+    const perSkuCounts = {};
+    const maxTotal = options.maxTotalItemsPerBox || REPLENISHMENT_CONFIG.maxTotalItemsPerBox;
+    const maxPerSku = options.maxPerSkuPerBox || REPLENISHMENT_CONFIG.maxPerSkuPerBox;
+    let remaining = remainingCapacity;
+
+    for (let step = 0; step < maxTotal; step++) {
+        let best = null;
+        for (const candidate of softCandidates) {
+            const count = perSkuCounts[candidate.id] || 0;
+            const perBoxCap = Math.min(candidate.maxPerBox, maxPerSku);
+            if (count >= perBoxCap) continue;
+            if (candidate.physicalVolume > remaining + 0.0001) continue;
+
+            const score = (candidate.ratio * 1000) +
+                ((candidate.priority || 1) * 80) +
+                (candidate.originalVolume / 1000) -
+                (candidate.physicalVolume / 2000);
+            if (!best || score > best.score) {
+                best = { candidate, score };
+            }
+        }
+        if (!best) break;
+        perSkuCounts[best.candidate.id] = (perSkuCounts[best.candidate.id] || 0) + 1;
+        remaining -= best.candidate.physicalVolume;
+    }
+
+    const selections = [];
+    for (const candidate of softCandidates) {
+        const qty = perSkuCounts[candidate.id] || 0;
+        if (qty <= 0) continue;
+        selections.push({
+            candidate,
+            qty,
+            physicalVolume: candidate.physicalVolume * qty,
+            originalVolume: candidate.originalVolume * qty,
+        });
+    }
+
+    selections.sort((a, b) =>
+        b.originalVolume - a.originalVolume ||
+        b.physicalVolume - a.physicalVolume ||
+        (b.candidate.priority || 1) - (a.candidate.priority || 1)
+    );
+
+    const compressedPlacements = _replBuildTheoreticalCompressedPlacements(selections, boxOrient, cavitiesBefore, options);
+    const placementMap = {};
+    for (const p of compressedPlacements) {
+        if (!placementMap[p.candidateId]) placementMap[p.candidateId] = [];
+        placementMap[p.candidateId].push(p);
+    }
+
+    const additions = selections.map(sel => {
+        const candidate = sel.candidate;
+        return {
+            candidateId: candidate.id,
+            name: candidate.name,
+            packagingType: candidate.packagingType,
+            qtyPerBox: sel.qty,
+            totalQty: sel.qty * boxCount,
+            volumeContribution: boxVol > 0 ? sel.originalVolume / boxVol : 0,
+            compressedVolumeContribution: boxVol > 0 ? sel.physicalVolume / boxVol : 0,
+            placements: placementMap[candidate.id] || [],
+            placementSummary: '软包逐件压缩填空',
+            warnings: ['软包按压缩率允许局部重叠，3D 用于展示采购补货方向'],
+        };
+    });
+
+    return {
+        additions,
+        compressedPlacements,
+        addedPhysicalVolume: selections.reduce((s, sel) => s + sel.physicalVolume, 0),
+        addedOriginalVolume: selections.reduce((s, sel) => s + sel.originalVolume, 0),
+    };
+}
+
+function _replBuildTheoreticalCompressedPlacements(selections, boxOrient, cavities, options) {
+    options = options || {};
+    const placements = [];
+    const usableCavities = (cavities || [])
+        .filter(_replCavityUsable)
+        .map((c, idx) => ({
+            ..._replCloneCavity(c),
+            idx,
+            volume: c.l * c.w * c.h,
+            remainingVolume: c.l * c.w * c.h,
+            itemCount: 0,
+        }))
+        .sort((a, b) => {
+            if (options.preferTopCavities) {
+                return b.z - a.z || b.volume - a.volume;
+            }
+            return a.z - b.z || b.volume - a.volume;
+        });
+    if (usableCavities.length === 0) return placements;
+
+    const units = [];
+    let colorIdx = 0;
+    for (const sel of selections || []) {
+        const candidate = sel.candidate;
+        const color = _replSoftPreviewColor(colorIdx++);
+        for (let i = 0; i < sel.qty; i++) {
+            units.push({
+                skuId: candidate.skuId || candidate.id,
+                candidateId: candidate.id,
+                skuName: candidate.name,
+                packagingType: candidate.packagingType,
+                originalDims: candidate.dimensions,
+                effectiveDims: candidate.dims,
+                qtyPerBox: 1,
+                totalQty: sel.qty,
+                unitIndex: i + 1,
+                theoretical: true,
+                virtual: true,
+                physicalVolume: candidate.physicalVolume,
+                originalVolume: candidate.originalVolume,
+                priority: candidate.priority || 1,
+                colorHex: color,
+            });
+        }
+    }
+
+    units.sort((a, b) =>
+        b.priority - a.priority ||
+        b.originalVolume - a.originalVolume ||
+        b.physicalVolume - a.physicalVolume
+    );
+
+    for (const unit of units) {
+        const cavity = _replPickTheoreticalCavity(usableCavities, unit.physicalVolume, options, boxOrient);
+        if (!cavity) break;
+        const placement = _replPlaceCompressedUnit(unit, cavity, boxOrient, options);
+        placements.push(placement);
+        cavity.remainingVolume -= unit.physicalVolume;
+        cavity.itemCount += 1;
+    }
+
+    return placements;
+}
+
+function _replPickTheoreticalCavity(cavities, unitVolume, options, boxOrient) {
+    options = options || {};
+    let best = null;
+    for (const c of cavities || []) {
+        const canAbsorb = c.remainingVolume + 0.01 >= unitVolume;
+        const sideTouch = boxOrient ? (
+            c.x < 0.01 ||
+            c.y < 0.01 ||
+            Math.abs(c.x + c.l - boxOrient.length) < 0.01 ||
+            Math.abs(c.y + c.w - boxOrient.width) < 0.01
+        ) : false;
+        const topRatio = boxOrient && boxOrient.height > 0 ? c.z / boxOrient.height : 0;
+        const shallowTopBonus = options.preferTopCavities && boxOrient
+            ? topRatio * 200000 + (sideTouch ? 30000 : 0) - Math.max(0, c.h - 6) * 1200
+            : 0;
+        const score = (canAbsorb ? 100000 : 0) +
+            shallowTopBonus +
+            c.remainingVolume -
+            (options.preferTopCavities ? 0 : c.z * 50) +
+            c.volume * 0.01;
+        if (!best || score > best.score) best = { cavity: c, score };
+    }
+    if (!best) return null;
+    best.cavity.forceVolumeEstimate = best.cavity.remainingVolume + 0.01 < unitVolume;
+    return best.cavity;
+}
+
+function _replPlaceCompressedUnit(unit, cavity, boxOrient, options) {
+    const overlapRatio = options.theoreticalOverlapRatio == null
+        ? REPLENISHMENT_CONFIG.theoreticalOverlapRatio
+        : options.theoreticalOverlapRatio;
+    const minSideScale = options.theoreticalVisualMinSideScale == null
+        ? REPLENISHMENT_CONFIG.theoreticalVisualMinSideScale
+        : options.theoreticalVisualMinSideScale;
+    const d = unit.effectiveDims || unit.originalDims;
+    const visualDims = options.preserveVisualOriginalDims
+        ? (unit.originalDims || d)
+        : d;
+    const maxL = Math.max(0.2, cavity.l * 0.96);
+    const maxW = Math.max(0.2, cavity.w * 0.96);
+    const maxH = Math.max(0.2, cavity.h * 0.96);
+    const display = options.fitDisplayInsideCavity
+        ? dims(
+            Math.max(0.12, Math.min(maxL, visualDims.length * (options.visualSideScale || minSideScale))),
+            Math.max(0.12, Math.min(maxW, visualDims.width * (options.visualSideScale || minSideScale))),
+            Math.max(0.08, Math.min(maxH, visualDims.height * (options.visualHeightScale || minSideScale)))
+        )
+        : options.preserveVisualOriginalDims ? dims(
+            Math.max(0.12, visualDims.length),
+            Math.max(0.12, visualDims.width),
+            Math.max(0.12, visualDims.height)
+        ) : dims(
+            Math.max(0.12, Math.min(d.length, Math.max(d.length * minSideScale, maxL))),
+            Math.max(0.12, Math.min(d.width, Math.max(d.width * minSideScale, maxW))),
+            Math.max(0.12, Math.min(d.height, Math.max(d.height * minSideScale, maxH)))
+        );
+
+    const stepScale = Math.max(0.18, 1 - overlapRatio);
+    const stepX = Math.max(0.08, display.length * stepScale);
+    const stepZ = Math.max(0.08, display.width * stepScale);
+    const stepY = Math.max(0.06, display.height * stepScale);
+    const cols = Math.max(1, Math.floor(Math.max(0, cavity.l - display.length) / stepX) + 1);
+    const rows = Math.max(1, Math.floor(Math.max(0, cavity.w - display.width) / stepZ) + 1);
+    const layers = Math.max(1, Math.floor(Math.max(0, cavity.h - display.height) / stepY) + 1);
+    const idx = cavity.itemCount || 0;
+    const col = idx % cols;
+    const row = Math.floor(idx / cols) % rows;
+    const layer = Math.floor(idx / (cols * rows)) % layers;
+    const wave = Math.floor(idx / Math.max(1, cols * rows * layers));
+    const jitter = Math.min(0.08, Math.min(cavity.l, cavity.w, cavity.h) * 0.015);
+
+    const x = _replClamp(cavity.x + col * stepX + (wave % 3) * jitter, 0, boxOrient.length - display.length);
+    const z = _replClamp(cavity.y + row * stepZ + (wave % 2) * jitter, 0, boxOrient.width - display.width);
+    let y = cavity.z + layer * stepY + (wave % 4) * jitter;
+    if (options.preserveVisualOriginalDims && y + display.height > boxOrient.height) {
+        y = Math.max(0, boxOrient.height - display.height);
+    } else {
+        y = _replClamp(y, 0, boxOrient.height - display.height);
+    }
+
+    return {
+        ...unit,
+        x,
+        y,
+        z,
+        length: display.length,
+        width: display.width,
+        height: display.height,
+        cavityId: cavity.idx,
+        cavitySource: cavity.source || 'cavity',
+        overlapRatio,
+        compressionRatio: unit.originalVolume > 0 ? unit.physicalVolume / unit.originalVolume : 1,
+        forceVolumeEstimate: !!cavity.forceVolumeEstimate,
+        preserveVisualOriginalDims: !!options.preserveVisualOriginalDims,
+        visualOverlapDepth: Math.max(0, display.height - cavity.h),
+        placementSummary: cavity.forceVolumeEstimate ? '碎片体积强制压缩估算' : '空腔体积压缩填充',
+    };
+}
+
+function _replClamp(v, min, max) {
+    if (max < min) return min;
+    return Math.max(min, Math.min(max, v));
+}
+
+function _replSoftPreviewColor(idx) {
+    const palette = [0x22c55e, 0xa855f7, 0xf59e0b, 0x06b6d4, 0xef4444, 0x84cc16];
+    return palette[idx % palette.length];
+}
+
 function _replExtractPlacedItems(layers) {
     const items = [];
     for (const layer of layers || []) {
@@ -328,6 +644,7 @@ function _replExtractPlacedItems(layers) {
                 l: p.length, w: p.width, h: p.height || layer.height,
                 skuId: p.skuId, skuName: p.skuName,
                 packagingType: p.packagingType,
+                originalDims: p.originalDims || null,
             });
         }
         for (const s of layer.stacks || []) {
@@ -336,10 +653,20 @@ function _replExtractPlacedItems(layers) {
                 l: s.length, w: s.width, h: s.height,
                 skuId: s.skuId, skuName: s.skuName,
                 packagingType: s.packagingType,
+                originalDims: s.originalDims || null,
             });
         }
     }
     return items;
+}
+
+function _replVolumeFromPlacedItems(items, useOriginal) {
+    return (items || []).reduce((sum, item) => {
+        if (useOriginal && item.originalDims) {
+            return sum + dimsVolume(item.originalDims);
+        }
+        return sum + (item.l || 0) * (item.w || 0) * (item.h || 0);
+    }, 0);
 }
 
 function _replBuildCavities(placedItems, boxInternal) {
@@ -484,28 +811,37 @@ function _replMinCandidateSide(candidates) {
     return Number.isFinite(minSide) ? minSide : 0.5;
 }
 
-function _replGenerate5cmBoxSizes(currentExternal, options) {
+function _replGetListedBoxCandidates(currentBoxType, options) {
     options = options || {};
-    const step = options.step || REPLENISHMENT_CONFIG.boxSizeStep;
-    const minSide = options.minSide || REPLENISHMENT_CONFIG.minBoxSide;
-    const maxSide = options.maxSide || CONFIG.maxSide;
-    const sizes = [];
-    for (let l = minSide; l <= maxSide; l += step) {
-        for (let w = minSide; w <= maxSide; w += step) {
-            for (let h = minSide; h <= maxSide; h += step) {
-                const sorted = [l, w, h].sort((a, b) => b - a);
-                const key = sorted.join('x');
-                if (sizes.some(s => s.key === key)) continue;
-                sizes.push({ key, dims: dims(sorted[0], sorted[1], sorted[2]) });
-            }
-        }
-    }
-    if (currentExternal) {
-        const sorted = [currentExternal.length, currentExternal.width, currentExternal.height].sort((a, b) => b - a);
-        const key = sorted.join('x');
-        if (!sizes.some(s => s.key === key)) sizes.push({ key, dims: dims(sorted[0], sorted[1], sorted[2]) });
-    }
-    return sizes.map(s => s.dims);
+    const source = Array.isArray(options.boxTypes) ? options.boxTypes : [];
+    const boxes = [];
+    const seen = new Set();
+    const addBox = (box) => {
+        if (!box || !box.external) return;
+        const wall = box.wallThickness || currentBoxType?.wallThickness || CONFIG.defaultWallThickness;
+        const external = dims(box.external.length, box.external.width, box.external.height);
+        const internal = box.internal
+            ? dims(box.internal.length, box.internal.width, box.internal.height)
+            : dims(
+                Math.max(0.1, external.length - wall * 2),
+                Math.max(0.1, external.width - wall * 2),
+                Math.max(0.1, external.height - wall * 2)
+            );
+        const key = [external.length, external.width, external.height]
+            .map(v => Number(v).toFixed(1)).sort().join('x');
+        if (seen.has(key)) return;
+        seen.add(key);
+        boxes.push({
+            id: box.id || 'box_alt_' + key.replace(/x/g, '_'),
+            name: box.name || `${external.length}×${external.width}×${external.height}`,
+            external,
+            internal,
+            wallThickness: wall,
+        });
+    };
+    for (const box of source) addBox(box);
+    addBox(currentBoxType);
+    return boxes;
 }
 
 function _replCloneCavity(c) {
@@ -513,7 +849,13 @@ function _replCloneCavity(c) {
 }
 
 function _replClonePlaced(p) {
-    return { x: p.x, y: p.y, z: p.z, l: p.l, w: p.w, h: p.h, skuId: p.skuId, skuName: p.skuName, packagingType: p.packagingType };
+    return {
+        x: p.x, y: p.y, z: p.z,
+        l: p.l, w: p.w, h: p.h,
+        skuId: p.skuId, skuName: p.skuName,
+        packagingType: p.packagingType,
+        originalDims: p.originalDims || null,
+    };
 }
 
 window.buildReplenishmentCandidates = buildReplenishmentCandidates;
@@ -523,3 +865,4 @@ window.enumerateCandidateFits = enumerateCandidateFits;
 window.scoreReplenishmentFit = scoreReplenishmentFit;
 window.simulateReplenishmentPlacements = simulateReplenishmentPlacements;
 window.summarizeUnusableCavities = summarizeUnusableCavities;
+window.buildSoftCompressionPlan = _replBuildTheoreticalSoftPlan;

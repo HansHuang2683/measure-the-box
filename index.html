@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/style.css?v=6">
+    <link rel="stylesheet" href="css/style.css?v=16">
     <!-- CDN 依赖 -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -40,12 +40,13 @@
             <table id="skuTable">
                 <thead>
                     <tr>
-                        <th style="width:18%;">SKU 名称</th>
-                        <th style="width:10%;">长 (cm)</th>
-                        <th style="width:10%;">宽 (cm)</th>
-                        <th style="width:10%;">高 (cm)</th>
+                        <th style="width:16%;">SKU 名称</th>
+                        <th style="width:9%;">长 (cm)</th>
+                        <th style="width:9%;">宽 (cm)</th>
+                        <th style="width:9%;">高 (cm)</th>
                         <th style="width:8%;">数量</th>
-                        <th style="width:10%;">包装类型</th>
+                        <th style="width:9%;">重量(kg/件)</th>
+                        <th style="width:9%;">包装类型</th>
                         <th style="width:8%;">公差%</th>
                         <th style="width:8%;">操作</th>
                     </tr>
@@ -104,6 +105,13 @@
     <div class="section">
         <div class="section-title">第三步：混装组配置</div>
         <div class="btn-group">
+            <label class="mode-inline-control">
+                <span>装箱模式</span>
+                <select id="autoPackingFitMode" onchange="updateAutoPackingFitMode(this.value)">
+                    <option value="strict">真实严格装箱</option>
+                    <option value="minOverflow">最少溢出装箱（软包塑形）</option>
+                </select>
+            </label>
             <button class="btn btn-primary" onclick="addMixedGroup()">+ 新建混装组</button>
             <button class="btn btn-outline" onclick="autoCreateGroups()">⚡ 自动分配方案</button>
             <button class="btn btn-success" onclick="validateAll()">✅ 验证所有混装组</button>
@@ -115,6 +123,24 @@
             <div class="icon">🔗</div>
             <div>还没有混装组，点击"新建混装组"手动配置，或"自动分配方案"快速生成</div>
         </div>
+    </div>
+
+    <!-- 3D Viewer -->
+    <div class="section" id="viewerSection">
+        <div class="section-title">3D 可视化</div>
+        <div class="viewer-controls">
+            <select id="viewerSelect" class="form-group" style="min-width:200px;" onchange="refreshViewer()">
+                <option value="">-- 选择一个箱子预览 --</option>
+            </select>
+            <button class="btn btn-sm btn-outline" onclick="refreshViewer()">刷新</button>
+            <button class="btn btn-sm btn-outline" onclick="onEnterSandbox()">🖐 沙盘模式</button>
+            <button class="btn btn-sm btn-outline" id="replenishmentBtn" onclick="toggleReplenishmentPanel()">补货推荐</button>
+        </div>
+        <div id="viewer-container">
+            <div class="viewer-empty">选择上方下拉菜单中的箱子查看 3D 布局</div>
+        </div>
+        <div id="replenishmentPanel" style="margin-top:12px;display:none;"></div>
+        <div id="cavityDiagnostics" style="margin-top:8px;display:none;"></div>
     </div>
 
     <!-- Step 4: Results -->
@@ -133,42 +159,22 @@
 
         <!-- Per-group results -->
         <div id="resultsGroups"></div>
-
-        <!-- 3D Viewer -->
-        <div style="margin-top:16px;">
-            <div class="section-title">3D 可视化</div>
-            <div class="viewer-controls">
-                <select id="viewerSelect" class="form-group" style="min-width:200px;" onchange="refreshViewer()">
-                    <option value="">-- 选择一个箱子预览 --</option>
-                </select>
-                <button class="btn btn-sm btn-outline" onclick="refreshViewer()">刷新</button>
-                <button class="btn btn-sm btn-outline" onclick="onEnterSandbox()">🖐 沙盘模式</button>
-                <button class="btn btn-sm btn-outline" id="cavityToggle" onclick="toggleCavityAlgorithm()">空腔吸附: OFF</button>
-                <button class="btn btn-sm btn-outline" id="cavityShowToggle" onclick="toggleCavityViewer()" style="display:none;">显示空腔: OFF</button>
-                <button class="btn btn-sm btn-outline" id="replenishmentBtn" onclick="toggleReplenishmentPanel()">补货推荐</button>
-            </div>
-            <div id="viewer-container">
-                <div class="viewer-empty">选择上方下拉菜单中的箱子查看 3D 布局</div>
-            </div>
-            <div id="replenishmentPanel" style="margin-top:12px;display:none;"></div>
-            <div id="cavityDiagnostics" style="margin-top:8px;display:none;"></div>
-        </div>
     </div>
 
 </div>
 
 <!-- Scripts (order matters) -->
-<script src="js/config.js"></script>
+<script src="js/config.js?v=2"></script>
 <script src="js/algorithm.js"></script>
-<script src="js/algorithm-mixed.js?v=2"></script>
+<script src="js/algorithm-mixed.js?v=3"></script>
 <script src="js/algorithm-cavity.js?v=4"></script>
-<script src="js/replenishment.js?v=2"></script>
+<script src="js/replenishment.js?v=8"></script>
 <script src="js/distribution.js"></script>
 <script src="js/customBox.js?v=2"></script>
-<script src="js/xlsxHandler.js"></script>
-<script src="js/renderer3d.js?v=12"></script>
-<script src="js/ui.js?v=3"></script>
-<script src="js/draft.js"></script>
-	<script src="js/auth.js"></script>
+<script src="js/xlsxHandler.js?v=2"></script>
+<script src="js/renderer3d.js?v=21"></script>
+<script src="js/ui.js?v=22"></script>
+<script src="js/draft.js?v=2"></script>
+	<script src="js/auth.js?v=3"></script>
 </body>
 </html>

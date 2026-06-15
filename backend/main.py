@@ -29,7 +29,10 @@ if not SECRET_KEY:
     raise RuntimeError("环境变量 SECRET_KEY 未设置！请设置一个随机密钥用于 JWT 签名。")
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_HOURS = 24
-CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "").split(",") if os.environ.get("CORS_ORIGINS") else ["http://localhost:8000"]
+CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "").split(",") if os.environ.get("CORS_ORIGINS") else [
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+]
 
 # ── 初始化 ────────────────────────────────────────────
 

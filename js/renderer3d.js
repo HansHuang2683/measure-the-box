@@ -158,7 +158,15 @@ function startAnim() {
 
 // ===== 渲染混装组的某个箱子 =====
 function loadGroupIntoViewer(group, boxType, result, boxIndex, cavities) {
+    window.__lastViewerRenderPayload = { group, boxType, result, boxIndex, cavities };
     ensureViewer(() => renderGroup(group, boxType, result, boxIndex, cavities));
+}
+
+function _getViewerDisplayMode() {
+    if (typeof window.getViewerDisplayMode === 'function') {
+        return window.getViewerDisplayMode() || 'real';
+    }
+    return 'real';
 }
 
 function renderGroup(group, boxType, result, boxIndex, cavities) {
@@ -186,6 +194,11 @@ function renderGroup(group, boxType, result, boxIndex, cavities) {
     const floorL = boxOrient.length * scale;
     const floorW = boxOrient.width * scale;
     const boxH = boxOrient.height * scale;
+    const mode = _getViewerDisplayMode();
+    const showReal = mode !== 'compressed';
+    const showRealContext = mode === 'compressed';
+    const forceCompressed = result.fitMode === 'min-overflow-soft';
+    const showCompressed = mode !== 'real' || forceCompressed;
 
     const hasLayout = result.layers && result.layers.length > 0;
     // 箱体线框（使用层架算法选定的朝向，确保产品始终在箱内）
@@ -196,10 +209,16 @@ function renderGroup(group, boxType, result, boxIndex, cavities) {
         const hint = makeLabelSprite('⚠️ 估算布局（无实际排布数据）');
         hint.position.set(0, boxH + 0.3, 0);
         scene.add(hint);
+        if (mode === 'compressed' || mode === 'overlay') {
+            const modeText = mode === 'compressed' ? '理论压缩预览' : '真实 + 理论叠加';
+            const modeHint = makeLabelSprite(modeText);
+            modeHint.position.set(0, boxH + 0.55, 0);
+            scene.add(modeHint);
+        }
     }
 
     // 层架
-    if (result.layers && result.layers.length > 0) {
+    if ((showReal || showRealContext) && result.layers && result.layers.length > 0) {
         const skuColorMap = new Map();
         let ci = 0;
         for (const layer of result.layers) {
@@ -212,6 +231,9 @@ function renderGroup(group, boxType, result, boxIndex, cavities) {
             }
         }
 
+        const realStyle = showRealContext
+            ? { opacity: 0.34, edgeOpacity: 0.22, emissiveIntensity: 0.01, depthWrite: false }
+            : undefined;
         for (const layer of result.layers) {
             const yOff = layer.yOffset * scale;
             for (const p of layer.placements) {
@@ -220,7 +242,7 @@ function renderGroup(group, boxType, result, boxIndex, cavities) {
                 drawProduct(
                     p.length * scale, p.width * scale, itemH,
                     p.x * scale - floorL / 2, yOff, p.y * scale - floorW / 2,
-                    color, p.skuName
+                    color, p.skuName, realStyle
                 );
             }
             // 堆叠的产品（矮产品上面的空气隙中）
@@ -229,14 +251,18 @@ function renderGroup(group, boxType, result, boxIndex, cavities) {
                 drawProduct(
                     s.length * scale, s.width * scale, s.height * scale,
                     s.x * scale - floorL / 2, yOff + s.stackBase * scale, s.z * scale - floorW / 2,
-                    color, s.skuName
+                    color, s.skuName, realStyle
                 );
             }
         }
     }
 
     // 溢出产品（装不下，半透明浮在箱子上面）
-    if (result.overflowItems && result.overflowItems.length > 0) {
+    if (showCompressed && result.compressedPlacements && result.compressedPlacements.length > 0) {
+        _drawCompressedPlacements(result.compressedPlacements, scale, floorL, floorW, boxH, boxOrient, mode);
+    }
+
+    if (showReal && result.overflowItems && result.overflowItems.length > 0) {
         const gridCols = Math.max(1, Math.ceil(Math.sqrt(result.overflowItems.length * 2)));
         const gridRows = Math.ceil(result.overflowItems.length / gridCols);
         const cellW = floorL / gridCols;
@@ -328,10 +354,11 @@ function buildNonSandboxPanel(result, boxOrient) {
             groups[s.skuId].count++;
             const x2 = s.x + (s.length || 0);
             const z2 = s.z + (s.width || 0);
-            const y2 = yOff + (s.stackBase || 0) + (s.height || 0);
+            const y0 = yOff + (s.stackBase || 0);
+            const y2 = y0 + (s.height || 0);
             if (s.x < minX) minX = s.x;
             if (x2 > maxX) maxX = x2;
-            if (yOff < minY) minY = yOff;
+            if (y0 < minY) minY = y0;
             if (y2 > maxY) maxY = y2;
             if (s.z < minZ) minZ = s.z;
             if (z2 > maxZ) maxZ = z2;
@@ -363,14 +390,72 @@ function buildNonSandboxPanel(result, boxOrient) {
             </div>`;
     }
 
+    let overflowHtml = '';
+    if (result.overflowItems && result.overflowItems.length > 0) {
+        const overflowGroups = {};
+        for (const item of result.overflowItems) {
+            const key = item.skuId || item.skuName || 'overflow';
+            if (!overflowGroups[key]) {
+                overflowGroups[key] = {
+                    name: item.skuName || '未放入产品',
+                    orig: item.originalDims || item.dims,
+                    count: 0,
+                };
+            }
+            overflowGroups[key].count++;
+        }
+        overflowHtml = '<div class="panel-subheader panel-subheader-warning">箱外未装</div>' +
+            Object.values(overflowGroups).map(g => {
+                const dims = g.orig || {};
+                const dimsStr = (dims.length != null && dims.width != null && dims.height != null)
+                    ? `${dims.length}×${dims.width}×${dims.height} cm` : '';
+                return `
+                    <div class="panel-item panel-overflow-item">
+                        <span class="panel-label">${g.name}</span>
+                        <span class="panel-dims">${dimsStr}</span>
+                        <span class="panel-qty">×${g.count}</span>
+                    </div>`;
+            }).join('');
+    }
+
+    let compressedHtml = '';
+    if (result.compressedPlacements && result.compressedPlacements.length > 0) {
+        const compressedGroups = {};
+        for (const p of result.compressedPlacements) {
+            const key = p.candidateId || p.skuId || p.skuName;
+            if (!compressedGroups[key]) {
+                compressedGroups[key] = {
+                    name: p.skuName || '软包塑形',
+                    count: 0,
+                    color: p.colorHex || 0x22c55e,
+                };
+            }
+            compressedGroups[key].count++;
+        }
+        compressedHtml = '<div class="panel-subheader">软包塑形估算</div>' +
+            Object.values(compressedGroups).map(g => `
+                <div class="panel-item panel-compressed-item">
+                    <span class="panel-swatch" style="background:#${g.color.toString(16).padStart(6, '0')}"></span>
+                    <span class="panel-label">${g.name}</span>
+                    <span class="panel-qty">×${g.count}</span>
+                </div>`).join('');
+    }
+
+    const overflowFitNote = buildOverflowFitNote(result, boxOrient, totalItems);
+
     const panel = document.createElement('div');
     panel.id = 'nonSandboxPanel';
     panel.className = 'product-panel-common';
     panel.innerHTML = `
         <div class="panel-header">产品清单</div>
-        <div class="panel-list">${listHtml}</div>
+        <div class="panel-list">
+            <div class="panel-subheader panel-subheader-real">真实已装</div>
+            ${listHtml || '<div class="panel-empty">无真实摆放产品</div>'}
+            ${overflowHtml}
+            ${compressedHtml}
+        </div>
         <div class="panel-footer">
-            <div class="panel-total-dims">外尺寸: ${usedL.toFixed(1)} × ${usedW.toFixed(1)} × ${usedH.toFixed(1)} cm</div>
+            <div class="panel-total-dims">摆放占用: ${usedL.toFixed(1)} × ${usedW.toFixed(1)} × ${usedH.toFixed(1)} cm</div>
             <div class="panel-total-count">总件数: ${totalItems}</div>
             <div style="margin-top:8px;padding-top:8px;border-top:1px solid #e8edf5;">
                 <div style="font-size:12px;color:#666;font-weight:500;margin-bottom:4px;">箱内剩余</div>
@@ -378,9 +463,43 @@ function buildNonSandboxPanel(result, boxOrient) {
                     长: ${remainingL.toFixed(1)} cm&nbsp;&nbsp;宽: ${remainingW.toFixed(1)} cm&nbsp;&nbsp;高: ${remainingH.toFixed(1)} cm
                 </div>
             </div>
+            ${overflowFitNote ? `<div class="panel-fit-note">${overflowFitNote}</div>` : ''}
+            ${result.theoreticalModeNote ? `<div class="panel-soft-note">${result.theoreticalModeNote}</div>` : ''}
         </div>
     `;
     container.appendChild(panel);
+}
+
+function buildOverflowFitNote(result, boxOrient, placedCount) {
+    const overflow = (result && result.overflowItems) || [];
+    if (!overflow.length || !boxOrient) return '';
+    const item = overflow[0];
+    const d = item.originalDims || item.dims;
+    if (!d || !(d.length > 0 && d.width > 0 && d.height > 0)) {
+        return `还有 ${overflow.length} 件未放入：剩余空间无法组成完整可摆放位置。`;
+    }
+
+    if (item.packagingType !== 'soft') {
+        const options = [
+            { l: d.length, w: d.width, h: d.height },
+            { l: d.width, w: d.length, h: d.height },
+        ];
+        let best = null;
+        for (const o of options) {
+            const perLayer = Math.floor(boxOrient.length / o.l) * Math.floor(boxOrient.width / o.w);
+            const layers = Math.floor(boxOrient.height / o.h);
+            const capacity = perLayer * layers;
+            const needLayers = perLayer > 0 ? Math.ceil((placedCount + overflow.length) / perLayer) : Infinity;
+            const needHeight = needLayers * o.h;
+            const cand = { ...o, perLayer, layers, capacity, needLayers, needHeight };
+            if (!best || cand.capacity > best.capacity) best = cand;
+        }
+        if (best && best.perLayer > 0) {
+            const shortHeight = Math.max(0, best.needHeight - boxOrient.height);
+            return `未放入 ${overflow.length} 件：硬包不可压缩。当前箱型每层最多 ${best.perLayer} 件，内高最多 ${best.layers} 层；要放完需 ${best.needLayers} 层，高度约 ${best.needHeight.toFixed(1)}cm，比箱内高多 ${shortHeight.toFixed(1)}cm。`;
+        }
+    }
+    return `还有 ${overflow.length} 件未放入：可见空隙被切成边角或高度差，无法形成一个完整 ${d.length}×${d.width}×${d.height}cm 的真实摆放位置。`;
 }
 
 // ===== 渲染图元 =====
@@ -413,20 +532,60 @@ function makeLabelSprite(text) {
     return sprite;
 }
 
-function drawProduct(pl, pw, ph, px, py, pz, color, name) {
+function drawProduct(pl, pw, ph, px, py, pz, color, name, opts) {
+    opts = opts || {};
     const geo = new THREE.BoxGeometry(pl, ph, pw);
     const mat = new THREE.MeshPhongMaterial({
-        color, transparent: true, opacity: 0.7,
-        emissive: color, emissiveIntensity: 0.05,
+        color,
+        transparent: true,
+        opacity: opts.opacity == null ? 0.7 : opts.opacity,
+        emissive: color,
+        emissiveIntensity: opts.emissiveIntensity == null ? 0.05 : opts.emissiveIntensity,
+        depthWrite: opts.depthWrite === true ? true : false,
     });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.set(px + pl / 2, py + ph / 2, pz + pw / 2);
     scene.add(mesh);
 
     const edges = new THREE.EdgesGeometry(geo);
-    const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.25 }));
+    const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({
+        color: opts.edgeColor == null ? color : opts.edgeColor,
+        transparent: true,
+        opacity: opts.edgeOpacity == null ? 0.25 : opts.edgeOpacity,
+    }));
     line.position.copy(mesh.position);
     scene.add(line);
+}
+
+function _drawCompressedPlacements(placements, scale, floorL, floorW, boxH, boxOrient, mode) {
+    const clusterColor = 0x22c55e;
+    const edgeColor = 0x16a34a;
+    const baseY = mode === 'compressed' ? 0 : 0.02;
+    for (const p of placements || []) {
+        const pl = p.length * scale;
+        const pw = p.width * scale;
+        const ph = p.height * scale;
+        if (pl <= 0 || pw <= 0 || ph <= 0) continue;
+
+        const px = p.x * scale - floorL / 2;
+        const pz = p.z * scale - floorW / 2;
+        const py = Math.max(baseY, p.y * scale);
+
+        const color = p.colorHex || clusterColor;
+        drawProduct(
+            pl, pw, ph,
+            px, py, pz,
+            color,
+            p.clusterLabel || (p.skuName ? p.skuName + ' ×' + (p.qtyPerBox || 1) : '理论压缩块'),
+            {
+                opacity: mode === 'compressed' ? 0.68 : 0.48,
+                edgeOpacity: mode === 'compressed' ? 0.9 : 0.65,
+                edgeColor: p.edgeColorHex || edgeColor,
+                emissiveIntensity: 0.03,
+                depthWrite: false,
+            }
+        );
+    }
 }
 
 function showViewerEmpty() {

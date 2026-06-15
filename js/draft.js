@@ -82,6 +82,7 @@ function restoreDraft() {
             width: String(sku.dimensions.width),
             height: String(sku.dimensions.height),
             qty: String(sku.quantity),
+            weight: String(sku.unitWeight || 0),
             pkg: sku.packagingType || 'hard',
             tol: sku.packagingType === 'soft' ? String(Math.round((sku.softTolerance || 0) * 100)) : '0',
         });
@@ -134,6 +135,7 @@ function restoreDraft() {
             name: group.name,
             boxTypeId: newBoxTypeId,
             boxCount: group.boxCount,
+            fitMode: group.fitMode || 'strict',
             assignments: newAssignments,
         });
     }

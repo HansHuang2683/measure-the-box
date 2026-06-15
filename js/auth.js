@@ -1,9 +1,14 @@
 // ===== FBA 装箱优化工具 — 认证 & 数据持久化 =====
 
-// Use relative URL when served by backend, fallback to localhost for dev
-const API_BASE = window.location.origin.startsWith('http') && window.location.port !== '8000' && window.location.port !== ''
-    ? 'http://localhost:8000'
-    : '';
+// 登录/历史记录需要 FastAPI 后端。由后端托管时使用同源；file:// 或其它静态预览回退到本地 8000。
+const API_BASE = (function () {
+    var origin = window.location.origin || '';
+    var protocol = window.location.protocol || '';
+    if (protocol === 'http:' || protocol === 'https:') {
+        return window.location.port === '8000' ? '' : 'http://localhost:8000';
+    }
+    return 'http://localhost:8000';
+})();
 
 // ── Toast ─────────────────────────────────────────────
 
@@ -35,7 +40,12 @@ var api = {
         var opts = { method: method, headers: headers };
         if (body) opts.body = JSON.stringify(body);
 
-        var res = await fetch(API_BASE + path, opts);
+        var res;
+        try {
+            res = await fetch(API_BASE + path, opts);
+        } catch (e) {
+            throw new Error('无法连接登录后端。请先在 backend 目录设置 SECRET_KEY 并启动 python main.py，然后访问 http://localhost:8000/');
+        }
         var data;
         try { data = await res.json(); } catch (e) { data = { detail: '请求失败' }; }
 
@@ -228,6 +238,7 @@ async function loadHistoryEntry(id) {
                 width: String(sku.dimensions.width),
                 height: String(sku.dimensions.height),
                 qty: String(sku.quantity),
+                weight: String(sku.unitWeight || 0),
                 pkg: sku.packagingType || 'hard',
                 tol: sku.packagingType === 'soft' ? String(Math.round((sku.softTolerance || 0) * 100)) : '0',
             });
@@ -280,6 +291,7 @@ async function loadHistoryEntry(id) {
                 name: group.name,
                 boxTypeId: newBoxTypeId,
                 boxCount: group.boxCount,
+                fitMode: group.fitMode || 'strict',
                 assignments: newAssignments,
             });
         }
@@ -325,9 +337,9 @@ async function handleSave() {
     }
 
     // Serialize data (strip functions, keep plain objects)
-    var skusData = skus.map(function (s) { return { id: s.id, name: s.name, quantity: s.quantity, dimensions: { length: s.dimensions.length, width: s.dimensions.width, height: s.dimensions.height }, packagingType: s.packagingType, softTolerance: s.softTolerance || 0 }; });
+    var skusData = skus.map(function (s) { return { id: s.id, name: s.name, quantity: s.quantity, unitWeight: s.unitWeight || 0, dimensions: { length: s.dimensions.length, width: s.dimensions.width, height: s.dimensions.height }, packagingType: s.packagingType, softTolerance: s.softTolerance || 0 }; });
     var boxesData = boxTypes.map(function (b) { return { id: b.id, name: b.name, external: { length: b.external.length, width: b.external.width, height: b.external.height }, wallThickness: b.wallThickness, internal: { length: b.internal.length, width: b.internal.width, height: b.internal.height } }; });
-    var groupsData = mixedGroups.map(function (g) { return { id: g.id, name: g.name, boxTypeId: g.boxTypeId, boxCount: g.boxCount, assignments: g.assignments.map(function (a) { return { skuId: a.skuId, qtyPerBox: a.qtyPerBox }; }) }; });
+    var groupsData = mixedGroups.map(function (g) { return { id: g.id, name: g.name, boxTypeId: g.boxTypeId, boxCount: g.boxCount, fitMode: g.fitMode || 'strict', assignments: g.assignments.map(function (a) { return { skuId: a.skuId, qtyPerBox: a.qtyPerBox }; }) }; });
 
     // Build lightweight result snapshot
     var resultData = null;
@@ -341,10 +353,12 @@ async function handleSave() {
             }
         }
         var totalSkus = skus.reduce(function (s, sk) { return s + sk.quantity; }, 0);
+        var totalWeight = skus.reduce(function (s, sk) { return s + (Number(sk.unitWeight) || 0) * (Number(sk.quantity) || 0); }, 0);
         resultData = {
             totalBoxes: totalBoxes,
             totalAllocated: totalAllocated,
             totalSkus: totalSkus,
+            totalWeight: totalWeight,
             groupCount: mixedGroups.length,
         };
     } catch (e) { /* ignore */ }

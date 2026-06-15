@@ -191,7 +191,7 @@ function tryShelfPack(items, boxDir) {
         let curHeight = 0;
         let startIdx = -1;
         for (let i = 0; i < remaining.length; i++) {
-            const orient = pickBestOrientation(remaining[i].dims, remainingH);
+            const orient = pickBestOrientation(remaining[i], remainingH);
             if (orient) {
                 curHeight = orient.h;
                 startIdx = i;
@@ -214,7 +214,7 @@ function tryShelfPack(items, boxDir) {
         const candidates = [];
         const laterItems = [];
         for (let i = startIdx; i < remaining.length; i++) {
-            const orient = pickBestOrientation(remaining[i].dims, curHeight);
+            const orient = pickBestOrientation(remaining[i], curHeight);
             if (orient) {
                 candidates.push({ item: remaining[i], l: orient.l, w: orient.w, h: orient.h });
             } else {
@@ -297,7 +297,7 @@ function tryGapFilling(layer, stackableItems, shelfHeight) {
         // 筛选能在空隙高度内放下的产品，预计算最佳朝向
         const candidates = [];
         for (const item of remaining) {
-            const orient = pickBestOrientation(item.dims, space.maxH);
+            const orient = pickBestOrientation(item, space.maxH);
             if (orient && orient.l <= space.l && orient.w <= space.w) {
                 candidates.push({ item, l: orient.l, w: orient.w, h: orient.h });
             }
@@ -442,8 +442,14 @@ function placeBestFit(freeRects, itemL, itemW) {
  * @param {Object} dims - {length, width, height}
  * @returns {Array} [{l, w, h}, ...]
  */
-function generateItemOrientations(dims) {
+function generateItemOrientations(dims, packagingType) {
     const a = dims.length, b = dims.width, c = dims.height;
+    if (packagingType !== 'soft') {
+        return [
+            { l: a, w: b, h: c },
+            { l: b, w: a, h: c },
+        ];
+    }
     return [
         { l: a, w: b, h: c },  // 原始朝向（平躺）
         { l: a, w: c, h: b },  // 侧放
@@ -457,8 +463,10 @@ function generateItemOrientations(dims) {
  * @param {number} maxHeight
  * @returns {Object|null} {l, w, h} 或 null（都不满足）
  */
-function pickBestOrientation(itemDims, maxHeight) {
-    const orients = generateItemOrientations(itemDims);
+function pickBestOrientation(itemOrDims, maxHeight) {
+    const itemDims = itemOrDims && itemOrDims.dims ? itemOrDims.dims : itemOrDims;
+    const packagingType = itemOrDims && itemOrDims.dims ? itemOrDims.packagingType : null;
+    const orients = generateItemOrientations(itemDims, packagingType);
     let best = null;
     let bestArea = Infinity;
     for (const o of orients) {
